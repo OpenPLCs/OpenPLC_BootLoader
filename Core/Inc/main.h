@@ -57,6 +57,8 @@ void array_prinf(unsigned char *data, unsigned int len);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define BOOT0_Pin GPIO_PIN_9
+#define BOOT0_GPIO_Port GPIOG
 #define RY1_Pin GPIO_PIN_8
 #define RY1_GPIO_Port GPIOI
 #define RY6_Pin GPIO_PIN_3
@@ -73,8 +75,7 @@ void array_prinf(unsigned char *data, unsigned int len);
 #define RS232_Enable_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define HEAD_OF_UPGRADE "bin_file_is_ready:"
-#define BIN_FILE_BUF_SIZE 32 * 1024 //
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
