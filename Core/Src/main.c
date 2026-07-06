@@ -144,6 +144,15 @@ int main(void)
     Relay_Off(relay);
   }
 
+  /* Wait for DHCP to assign an IP before starting the servers */
+  {
+    extern struct netif gnetif;
+    uint32_t t0 = HAL_GetTick();
+    while (ip4_addr_isany(netif_ip4_addr(&gnetif))) {
+      MX_LWIP_Process();
+      if (HAL_GetTick() - t0 > 10000) break; /* 10 s timeout */
+    }
+  }
   IAP_init();
   /* USER CODE END 2 */
 
