@@ -53,7 +53,7 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void array_prinf(unsigned char *data, unsigned int len);
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

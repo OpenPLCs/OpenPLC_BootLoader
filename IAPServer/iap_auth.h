@@ -6,15 +6,15 @@
  * mode). Without this, anyone who can reach the TCP/UDP port could issue
  * those commands with no proof of authorization at all.
  *
- * *** Ships with a fixed placeholder key -- see iap_auth.c and
- * IAPServer/keys/README.md. This lets the whole challenge-response protocol
- * be built and tested end to end before a real per-device key provisioning
- * process exists. Replace iap_auth_key in iap_auth.c with a real per-device
- * secret before shipping anything. ***
+ * The key itself is per-device: see iap_keyderive.h. It is derived from a
+ * fixed shared password mixed with this device's machine ID (UID), so every
+ * device authenticates with a different effective key even though the same
+ * password is embedded in every firmware image. See IAPServer/keys/README.md
+ * for provisioning notes.
  *
  * Protocol: client requests a challenge, device replies with a nonce that
  * can only ever be used once and expires after IAP_AUTH_NONCE_TTL_MS; client
- * proves it holds the shared key by sending HMAC-SHA256(key, nonce || msg)
+ * proves it holds the device key by sending HMAC-SHA256(key, nonce || msg)
  * where `msg` is the exact command it wants authorized.
  */
 
@@ -46,6 +46,10 @@ bool iap_auth_verify_and_consume(const uint8_t *msg, uint32_t msg_len, const uin
  * can attach "which challenge attempt this event corresponds to" to audit
  * log entries -- it is not secret and is not part of any security check. */
 uint32_t iap_auth_get_counter(void);
+
+/* Reports at boot whether the VBAT-backed domain survived the last power-off.
+ * Call once, after MX_RTC_Init(). */
+void iap_auth_report_backup_domain(void);
 
 #ifdef __cplusplus
 }

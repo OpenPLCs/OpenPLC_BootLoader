@@ -1,4 +1,13 @@
 # open-plc
+
+> This README covers flashing the bootloader onto a board and the Arduino-side
+> installation only.
+>
+> This repository's own behaviour and security model are documented in `docs/`,
+> which is the single source for both. Requirement and verification status is
+> product-level and lives in the AI-Skills checkout, under `OpenPLC/docs/`. Do
+> not restate any of it here.
+
 # Prerequisities (Win or Linux)
 a- Download and install STM32-Cube IDE lastest [Link](https://www.st.com/en/development-tools/stm32cubeide.html)  
 b- Download and install arduino ide lastest [Link](https://www.arduino.cc/en/software)  
@@ -11,7 +20,9 @@ There are two modes of the openplc:
 - APP mode (default): Run the arduino application directly.  
 
 There are three ways to stay in the UPLOAD mode:  
-1. The BKP register `MAGIC_BKP_REG` is set to `MAGIC_CDC_FLAG` or `MAGIC_ETH_FLAG`  
+1. The running application asked for it, through the handoff record in SRAM4
+   (`boot_handoff_t`, see `IAPServer/IAP_boot_handoff.c`). This replaced the older
+   RTC-backup-register magic flag; the register is no longer consulted.
 2. The address of `IAP_APP_ADDRESS` is empty
 3. The address of `IAP_APP_ADDRESS` is not empty and the button `BOOT0` is pressed
 

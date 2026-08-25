@@ -32,7 +32,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+/* The fault handlers have to be naked, which cannot be expressed inside the
+ * bodies CubeMX generates. Rename the generated ones out of the way; the real
+ * ones are defined in USER CODE 1 at the end of this file, so regenerating from
+ * the .ioc no longer removes them. */
+#define HardFault_Handler   HardFault_Handler_generated_unused
+#define MemManage_Handler   MemManage_Handler_generated_unused
+#define BusFault_Handler    BusFault_Handler_generated_unused
+#define UsageFault_Handler  UsageFault_Handler_generated_unused
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,7 +54,7 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-void IT_Manage_Handler(char *g_fault_type);
+void IT_Fault_Report(uint32_t *frame, uint32_t exc_return, uint32_t which);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -86,12 +93,11 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-	IT_Manage_Handler("HardFault");
+
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-
     /* USER CODE END W1_HardFault_IRQn 0 */
   }
 }
@@ -102,7 +108,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-	IT_Manage_Handler("MemManage");
+
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -230,33 +236,153 @@ void OTG_FS_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-void IT_Manage_Handler(char *g_fault_type)
+#undef HardFault_Handler
+#undef MemManage_Handler
+#undef BusFault_Handler
+#undef UsageFault_Handler
+
+/*
+ * The real fault handlers. Naked so that no compiler prologue runs before the
+ * stack pointer is read: the exception frame sits where SP was on exception
+ * entry. EXC_RETURN bit 2 says which stack the core used, and is passed on so
+ * the report can name it.
+ */
+__attribute__((naked)) void HardFault_Handler(void)
 {
-    uint32_t *fault_stack = (uint32_t *)__get_MSP();  // 或 PSP, 取决于运行上下文
+  __asm volatile (
+    "tst   lr, #4        \n"
+    "ite   eq            \n"
+    "mrseq r0, msp       \n"
+    "mrsne r0, psp       \n"
+    "mov   r1, lr        \n"
+    "movs  r2, #1        \n"
+    "b     IT_Fault_Report\n"
+  );
+}
 
-    uint32_t r0 = fault_stack[0];
-    uint32_t r1 = fault_stack[1];
-    uint32_t r2 = fault_stack[2];
-    uint32_t r3 = fault_stack[3];
-    uint32_t r12 = fault_stack[4];
-    uint32_t lr = fault_stack[5];
-    uint32_t pc = fault_stack[6];
-    uint32_t psr = fault_stack[7];
+__attribute__((naked)) void MemManage_Handler(void)
+{
+  __asm volatile (
+    "tst   lr, #4        \n"
+    "ite   eq            \n"
+    "mrseq r0, msp       \n"
+    "mrsne r0, psp       \n"
+    "mov   r1, lr        \n"
+    "movs  r2, #2        \n"
+    "b     IT_Fault_Report\n"
+  );
+}
 
-    printf("\n--- %s Fault ---\n", g_fault_type);
-    printf("R0  = 0x%08lX\n", r0);
-    printf("R1  = 0x%08lX\n", r1);
-    printf("R2  = 0x%08lX\n", r2);
-    printf("R3  = 0x%08lX\n", r3);
-    printf("R12 = 0x%08lX\n", r12);
-    printf("LR  = 0x%08lX\n", lr);
-    printf("PC  = 0x%08lX\n", pc);
-    printf("xPSR= 0x%08lX\n", psr);
+__attribute__((naked)) void BusFault_Handler(void)
+{
+  __asm volatile (
+    "tst   lr, #4        \n"
+    "ite   eq            \n"
+    "mrseq r0, msp       \n"
+    "mrsne r0, psp       \n"
+    "mov   r1, lr        \n"
+    "movs  r2, #3        \n"
+    "b     IT_Fault_Report\n"
+  );
+}
 
-    // 内存管理错误状态寄存器
-    printf("CFSR = 0x%08lX\n", SCB->CFSR);
-    printf("MMFAR = 0x%08lX\n", SCB->MMFAR); // 有效地址
+__attribute__((naked)) void UsageFault_Handler(void)
+{
+  __asm volatile (
+    "tst   lr, #4        \n"
+    "ite   eq            \n"
+    "mrseq r0, msp       \n"
+    "mrsne r0, psp       \n"
+    "mov   r1, lr        \n"
+    "movs  r2, #4        \n"
+    "b     IT_Fault_Report\n"
+  );
+}
 
-    while (1);
+/*
+ * Called from the naked handlers above with the exception frame still intact.
+ * `frame` is the stack pointer at exception entry, `exc_return` is the LR value
+ * the core supplied, `which` names the handler.
+ */
+void IT_Fault_Report(uint32_t *frame, uint32_t exc_return, uint32_t which)
+{
+    static const char * const names[] = {
+        "Unknown", "HardFault", "MemManage", "BusFault", "UsageFault"
+    };
+    const uint32_t cfsr  = SCB->CFSR;
+    const uint32_t hfsr  = SCB->HFSR;
+    const uint32_t mmfsr = cfsr & 0xFFU;
+    const uint32_t bfsr  = (cfsr >> 8) & 0xFFU;
+    const uint32_t ufsr  = (cfsr >> 16) & 0xFFFFU;
+
+    printf("\n--- %s ---\n", names[(which < 5U) ? which : 0U]);
+    printf("frame @ 0x%08lX (%s)  EXC_RETURN = 0x%08lX\n",
+           (unsigned long) (uint32_t) frame,
+           ((exc_return & 4U) != 0U) ? "PSP" : "MSP",
+           (unsigned long) exc_return);
+
+    /* The stacked frame: R0 R1 R2 R3 R12 LR PC xPSR. PC is the instruction
+     * that faulted (or the one after it, for imprecise errors); LR is the
+     * return address of whoever called that code -- run both through
+     * addr2line to get file and line. */
+    printf("R0  = 0x%08lX  R1 = 0x%08lX  R2 = 0x%08lX  R3 = 0x%08lX\n",
+           (unsigned long) frame[0], (unsigned long) frame[1],
+           (unsigned long) frame[2], (unsigned long) frame[3]);
+    printf("R12 = 0x%08lX  LR = 0x%08lX  PC = 0x%08lX  xPSR = 0x%08lX\n",
+           (unsigned long) frame[4], (unsigned long) frame[5],
+           (unsigned long) frame[6], (unsigned long) frame[7]);
+
+    printf("CFSR = 0x%08lX  HFSR = 0x%08lX\n",
+           (unsigned long) cfsr, (unsigned long) hfsr);
+
+    /* Decoded, because the bit that matters here is easy to miss in hex. */
+    if (mmfsr != 0U) {
+        printf("  MemManage:%s%s%s%s%s\n",
+               (mmfsr & (1U << 0)) ? " IACCVIOL"  : "",
+               (mmfsr & (1U << 1)) ? " DACCVIOL"  : "",
+               (mmfsr & (1U << 3)) ? " MUNSTKERR" : "",
+               (mmfsr & (1U << 4)) ? " MSTKERR"   : "",
+               (mmfsr & (1U << 5)) ? " MLSPERR"   : "");
+    }
+    if (bfsr != 0U) {
+        printf("  BusFault:%s%s%s%s%s%s\n",
+               (bfsr & (1U << 0)) ? " IBUSERR"     : "",
+               (bfsr & (1U << 1)) ? " PRECISERR"   : "",
+               (bfsr & (1U << 2)) ? " IMPRECISERR" : "",
+               (bfsr & (1U << 3)) ? " UNSTKERR"    : "",
+               (bfsr & (1U << 4)) ? " STKERR"      : "",
+               (bfsr & (1U << 5)) ? " LSPERR"      : "");
+    }
+    if (ufsr != 0U) {
+        printf("  UsageFault:%s%s%s%s%s%s\n",
+               (ufsr & (1U << 0)) ? " UNDEFINSTR" : "",
+               (ufsr & (1U << 1)) ? " INVSTATE"   : "",
+               (ufsr & (1U << 2)) ? " INVPC"      : "",
+               (ufsr & (1U << 3)) ? " NOCP"       : "",
+               (ufsr & (1U << 8)) ? " UNALIGNED"  : "",
+               (ufsr & (1U << 9)) ? " DIVBYZERO"  : "");
+    }
+
+    /* Only meaningful when the corresponding valid bit is set; printing them
+     * unconditionally, as the old version did with MMFAR, invites reading a
+     * stale address as if it were this fault's. */
+    if ((mmfsr & (1U << 7)) != 0U) {
+        printf("  MMFAR = 0x%08lX\n", (unsigned long) SCB->MMFAR);
+    }
+    if ((bfsr & (1U << 7)) != 0U) {
+        printf("  BFAR  = 0x%08lX\n", (unsigned long) SCB->BFAR);
+    }
+    if ((bfsr & (1U << 2)) != 0U) {
+        printf("  (imprecise: the faulting store already retired, so PC points\n"
+               "   at whatever was executing when the error caught up, not at\n"
+               "   the access itself)\n");
+    }
+
+    fflush(stdout);
+
+    /* Deliberately hangs. Never reset to recover here: a fault that resets
+     * itself away leaves no evidence and turns a reproducible bug into an
+     * intermittent one. The board stays put with the report on the wire. */
+    while (1) { }
 }
 /* USER CODE END 1 */

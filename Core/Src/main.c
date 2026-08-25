@@ -18,34 +18,32 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "crc.h"
-#include "lwip.h"
-#include "rtc.h"
 #include "usart.h"
-#include "usb_device.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* Phase 2 peripherals: CubeMX no longer emits their init calls. */
+#include "rtc.h"
+#include "crc.h"
+#include "fmc.h"
+#include "usb_device.h"
+#include "lwip.h"
+
 #include "relay.h"
 #include "IAP_server.h"
-#include "pwm_test.h"
-#include "rs232_test.h"
-#include "adc_test.h"
-#include "sdram_test.h"
-#include "sd_test.h"
+#include "IAP_boot_handoff.h"
+#include "iap_auth.h"
+#include "owner_slot.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #ifdef __GNUC__
-/* With GCC/RAISONANCE, small printf (option LD Linker->Libraries->Small printf
- set to 'Yes') calls __io_putchar() */
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 #else
 #define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
 #endif /* __GNUC__ */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -68,26 +66,125 @@
 void SystemClock_Config(void);
 static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
-// RS232
+
+/* Bounded stand-in for ITM_SendChar(): never spin forever on the trace FIFO. */
+static void itm_putchar_bounded(uint8_t ch)
+{
+	if (((ITM->TCR & ITM_TCR_ITMENA_Msk) == 0UL) || ((ITM->TER & 1UL) == 0UL)) {
+		return;
+	}
+	for (uint32_t spins = 0U; spins < 1000U; spins++) {
+		if (ITM->PORT[0U].u32 != 0UL) {
+			ITM->PORT[0U].u8 = ch;
+			return;
+		}
+	}
+}
+
+/* stdout goes to SWO/ITM and RS232, both bounded: a bootloader must never hang
+ * on a log line. */
 PUTCHAR_PROTOTYPE {
-	/* Place your implementation of fputc here */
-	/* e.g. write a character to the USART1 and Loop until the end of transmission */
-	HAL_UART_Transmit(&huart4, (uint8_t*) &ch, 1, HAL_MAX_DELAY);
+	itm_putchar_bounded((uint8_t) ch);
+	(void) HAL_UART_Transmit(&huart4, (uint8_t*) &ch, 1, 10);
 	return ch;
 }
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void array_prinf(unsigned char *data, unsigned int len) {
-	printf("{\r\n");
-	for (int i = 0; i < len; i++) {
-		printf("0x%02x,", data[i]);
 
-		if ((len % 8) == 7)
-			printf("\r\n");
+/* What server_decide() settled on. Phase 2 and the superloop key off it. */
+static IAP_Method s_boot_mode = IAP_NONE;
+
+/* Startup window: the relay clicks are the operator's cue to press BOOT0.
+ * 3 relays x 500 ms = 1.5 s, then one read.
+ *
+ * ⚠️ The judgement is "was the button down at the 1.5 s mark", NOT "was it
+ * held for 1.5 s". BOOT0 is not looked at while the relays click. Holding the
+ * button throughout is just the practical way to be sure of covering that one
+ * instant, which is what the banner is really telling the operator to do. */
+#define BOOT0_WINDOW_MS        500U
+#define BOOT0_WINDOW_RELAYS    3U
+
+/* Keep holding past the decision point and it becomes a second gesture:
+ * factory reset (requirement C10, module M1). Ten seconds is far enough from
+ * the 1.5 s mark that nobody reaches it by holding "a bit longer to be sure". */
+#define BOOT0_FACTORY_HOLD_MS  10000U
+
+/* A button that never reads as released is a stuck button or a shorted net.
+ * Waiting for it forever would leave the board sitting in this loop with no
+ * output and no way on, which looks exactly like a dead bootloader. */
+#define BOOT0_HOLD_LIMIT_MS    30000U
+
+#define BOOT0_POLL_MS          10U
+
+typedef enum {
+	BOOT0_GESTURE_NONE = 0,       /* not down at the decision point            */
+	BOOT0_GESTURE_UPLOAD,         /* down at 1.5 s, released before 10 s       */
+	BOOT0_GESTURE_FACTORY_RESET   /* held past 10 s, then released             */
+} boot0_gesture_t;
+
+/*
+ * Three fast clicks: "the factory-reset gesture is armed, let go now".
+ *
+ * Audible rather than visual on purpose. This board has no general-purpose
+ * LED, and it is usually inside a cabinet where nobody can see one anyway --
+ * the relay clicks are already how the startup window announces itself.
+ */
+static void boot0_armed_signal(void)
+{
+	for (uint32_t i = 0U; i < 3U; i++) {
+		Relay_On((RELAY_Name) 0);
+		HAL_Delay(60U);
+		Relay_Off((RELAY_Name) 0);
+		HAL_Delay(60U);
 	}
-	printf("}\r\n");
+}
+
+static boot0_gesture_t boot_window_relay(void)
+{
+	uint32_t held_ms;
+	bool armed = false;
+
+	for (uint32_t i = 0U; i < BOOT0_WINDOW_RELAYS; i++) {
+		Relay_On((RELAY_Name) i);
+		HAL_Delay(BOOT0_WINDOW_MS);
+		Relay_Off((RELAY_Name) i);
+	}
+
+	if (boot0_is_pressed() == 0U) {
+		return BOOT0_GESTURE_NONE;
+	}
+
+	/* Down at the decision point, so the board stays in the bootloader whatever
+	 * happens next. Keep watching only to tell the two gestures apart. Nothing
+	 * below can change that decision -- it can only add the factory reset. */
+	printf("** BOOT0 held - keep holding for %u s to arm a factory reset, "
+			"or let go now for upload mode **\r\n",
+			(unsigned)(BOOT0_FACTORY_HOLD_MS / 1000U));
+
+	held_ms = BOOT0_WINDOW_RELAYS * BOOT0_WINDOW_MS;
+	while (boot0_is_pressed() != 0U) {
+		if (!armed && (held_ms >= BOOT0_FACTORY_HOLD_MS)) {
+			armed = true;
+			boot0_armed_signal();
+			printf("** Factory reset ARMED - release BOOT0 to run it, "
+					"or reset the board to cancel **\r\n");
+			/* The clicks take time of their own; count it. */
+			held_ms += 6U * 60U;
+			continue;
+		}
+		if (held_ms >= BOOT0_HOLD_LIMIT_MS) {
+			printf("** BOOT0 still down after %u s - treating it as stuck, "
+					"continuing in upload mode **\r\n",
+					(unsigned)(BOOT0_HOLD_LIMIT_MS / 1000U));
+			return BOOT0_GESTURE_UPLOAD;
+		}
+		HAL_Delay(BOOT0_POLL_MS);
+		held_ms += BOOT0_POLL_MS;
+	}
+
+	return armed ? BOOT0_GESTURE_FACTORY_RESET : BOOT0_GESTURE_UPLOAD;
 }
 
 /* USER CODE END 0 */
@@ -100,6 +197,31 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+
+  /* Latch the reset cause before anything can clear RCC->RSR. The cold-boot
+   * test that keeps us from reading never-written ECC SRAM depends on it. */
+  boot_handoff_latch_reset_cause();
+
+  /* Enable the three configurable fault exceptions. Left at their reset default
+   * they stay disabled and every MemManage / BusFault / UsageFault escalates to
+   * HardFault, so IT_Fault_Report() can only ever report "HardFault" and the
+   * stacked PC is the escalation point rather than the faulting instruction.
+   * Enabled, each fault takes its own vector and the report names it directly.
+   *
+   * First statement in main(): SCB needs no clock and no init, so this covers
+   * the whole boot. A fault before MX_UART4_Init() still reports over SWO/ITM. */
+  SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk | SCB_SHCSR_BUSFAULTENA_Msk
+              | SCB_SHCSR_USGFAULTENA_Msk;
+
+  /* Initialise the D-cache RAMs even though the D-cache stays off. They come up
+   * random at power-on, tag and ECC bits included, and any invalidate-by-address
+   * has to look a tag up before it can act -- landing on a random entry whose
+   * ECC does not check out raises an imprecise BusFault. This pass walks the
+   * cache by set and way, which writes the tags instead of looking them up, so
+   * it is safe on an uninitialised cache; SCB_EnableDCache() opens with the same
+   * step for the same reason. Costs tens of microseconds, once. */
+  SCB_InvalidateDCache();
+
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -110,9 +232,6 @@ int main(void)
   /* Enable I-Cache---------------------------------------------------------*/
   SCB_EnableICache();
 
-  /* Enable D-Cache---------------------------------------------------------*/
-  SCB_EnableDCache();
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -122,45 +241,70 @@ int main(void)
 
   /* USER CODE END Init */
 
-  /* Configure the system clock */
-  SystemClock_Config();
-
   /* USER CODE BEGIN SysInit */
 
-  /* USER CODE END SysInit */
+  SystemClock_Config();
 
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_USB_DEVICE_Init();
+  /* Phase 1: decide. Only what the decision itself needs is brought up here, so
+   * the application inherits none of our peripheral state on the jump path. */
+  MX_GPIO_Init();      /* BOOT0 net, relay outputs, RS232_Enable */
+  BOOT0_ConfigureAsInput();  /* undo the generated output config on PG9 */
+  Enable_RX_RS232();   /* the MAX3221 stays in shutdown until this pin is high */
   MX_UART4_Init();
-  MX_RTC_Init();
-  MX_CRC_Init();
-  MX_LWIP_Init();
-  /* USER CODE BEGIN 2 */
-  Enable_RX_RS232();
 
   printf("** Checking Starting Mod ...\r\n"
 		  "** (IF You want OpenPLC to stay in upload mode, please hold down the BOOT0 button for 3-5 seconds while clicking)\r\n");
 
-  // Einschalten aller HSFETs einmalig und dann ausschalten
-  for (RELAY_Name relay = RELAY_1; relay < RELAY_COUNT / 2; ++relay) {
-    Relay_On(relay);
-    HAL_Delay(500); // Einschaltverzoegerung von 500 Millisekunden
-    Relay_Off(relay);
+  printf("** Reset cause: %s\r\n", boot_handoff_reset_cause_str());
+
+  {
+    boot0_gesture_t gesture = boot_window_relay();
+
+    if (gesture == BOOT0_GESTURE_FACTORY_RESET) {
+      /* ⚠️ BEFORE server_decide(), because that is where the owner slot is
+       * scanned and reported. Clearing afterwards would make this boot's log
+       * describe ownership that had just been thrown away -- the log would
+       * contradict the board on the one boot where somebody is certainly
+       * reading it.
+       *
+       * The gesture is the physical gate: ten seconds on a button nobody
+       * reaches by accident, on a board somebody is standing at. */
+      (void)owner_slot_factory_reset(true);
+    }
+
+    /* server_decide() only needs to know whether to stay in the bootloader.
+     * Both gestures mean yes; they differ only in what happened above. */
+    s_boot_mode = server_decide((gesture == BOOT0_GESTURE_NONE) ? 0U : 1U);
   }
 
-  // Only one of these runs forever and hijacks the boot - uncomment the one
-  // you're currently bringing up, leave the rest commented out.
-  // PWM_Test_Run();        // Digital Out 6 breathing LED
-  //ADC_Test_Run();        // on-board temp sensors (PA0/PA3)
-  //RS232_Test_Run();         // RS232 RX echo
-  //SDRAM_Test_Capacity();            // external SDRAM: how big is it really?
-  //SDRAM_Test_Retention();          // external SDRAM: random addr, wait 5s, read back
-  //SDRAM_Test_CubeProgrammerVerify(); // external SDRAM: write via CubeProgrammer, verify CRC32 here
-  //SD_Test_Info();                   // microSD: is a card detected, how big is it?
-  SD_Test_FileIntegrity();          // microSD: FatFs write+read-back+CRC32 on the inserted card
+  if (s_boot_mode == IAP_NONE) {
+    server_jump_to_app();   /* hands the hardware back; never returns */
+  }
+  /* USER CODE END SysInit */
 
-//  IAP_init();
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  /* USER CODE BEGIN 2 */
+
+  /* Phase 2: staying in the bootloader. */
+
+  /* MX_GPIO_Init() above drove RS232_Enable low again. */
+  Enable_RX_RS232();
+
+  MX_RTC_Init();   /* iap_auth's nonce counter lives in a backup register */
+  iap_auth_report_backup_domain();
+  MX_CRC_Init();   /* upload checksum */
+  MX_FMC_Init();   /* external SDRAM: staging area for the incoming image */
+
+  /* IAP_ALL means the channel is unknown, so open both rather than guess. */
+  if ((s_boot_mode == IAP_CDC) || (s_boot_mode == IAP_ALL)) {
+    MX_USB_DEVICE_Init();
+  }
+  if ((s_boot_mode == IAP_ETHERNET) || (s_boot_mode == IAP_ALL)) {
+    MX_LWIP_Init();
+  }
+
+  IAP_servers_start(s_boot_mode);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -169,9 +313,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//    IAP_task();
-//    MX_LWIP_Process();
-//    HAL_Delay(10);
+    IAP_task();
+    /* MX_LWIP_Init() only ran for the ethernet modes. */
+    if ((s_boot_mode == IAP_ETHERNET) || (s_boot_mode == IAP_ALL)) {
+      MX_LWIP_Process();
+    }
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
@@ -256,7 +403,7 @@ void MPU_Config(void)
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
   MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
-  MPU_InitStruct.SubRegionDisable = 0x87;
+  MPU_InitStruct.SubRegionDisable = 0xC7;
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
   MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
@@ -269,7 +416,7 @@ void MPU_Config(void)
   /** Initializes and configures the Region and the memory to be protected
   */
   MPU_InitStruct.Number = MPU_REGION_NUMBER1;
-  MPU_InitStruct.BaseAddress = 0x30020000;
+  MPU_InitStruct.BaseAddress = 0x30000000;
   MPU_InitStruct.Size = MPU_REGION_SIZE_128KB;
   MPU_InitStruct.SubRegionDisable = 0x0;
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
@@ -281,8 +428,8 @@ void MPU_Config(void)
   /** Initializes and configures the Region and the memory to be protected
   */
   MPU_InitStruct.Number = MPU_REGION_NUMBER2;
-  MPU_InitStruct.BaseAddress = 0x30040000;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_512B;
+  MPU_InitStruct.BaseAddress = 0x30020000;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_256B;
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
   MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_BUFFERABLE;

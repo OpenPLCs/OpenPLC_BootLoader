@@ -95,15 +95,15 @@ LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX
 static uint8_t RxAllocStatus;
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
 
-#pragma location=0x30040000
+#pragma location=0x30020000
 ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x30040100
+#pragma location=0x30020060
 ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
 
 #elif defined ( __CC_ARM )  /* MDK ARM Compiler */
 
-__attribute__((at(0x30040000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x30040100))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
+__attribute__((at(0x30020000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
+__attribute__((at(0x30020060))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
 
 #elif defined ( __GNUC__ ) /* GNU Compiler */
 
@@ -113,7 +113,7 @@ ETH_DMADescTypeDef DMATxDscrTab[ETH_TX_DESC_CNT] __attribute__((section(".TxDecr
 #endif
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
-#pragma location = 0x30040200
+#pragma location = 0x30020100
 extern u8_t memp_memory_RX_POOL_base[];
 
 #elif defined ( __CC_ARM ) /* MDK ARM Compiler */
@@ -186,7 +186,25 @@ static void low_level_init(struct netif *netif)
   heth.Init.RxBuffLen = 1536;
 
   /* USER CODE BEGIN MACADDRESS */
+  /* Give every board its own MAC: the generated one above is a build-time
+   * constant, so two boards on one LAN would collide.
+   * Same derivation as openplc_make_mac_from_uid() in the Arduino core
+   * (libraries/OpenPLC_Net/src/ethernetif.c). A user application is free to
+   * pick its own instead -- devices are located by UID, not by address. */
+  {
+    uint32_t u0 = HAL_GetUIDw0();
+    uint32_t u1 = HAL_GetUIDw1();
+    uint32_t u2 = HAL_GetUIDw2();
+    uint32_t h = u0 ^ (u1 << 7) ^ (u2 >> 3) ^ 0xA5C39E17U;
 
+    /* bit1=1 local administered, bit0=0 unicast */
+    MACAddr[0] = 0x02U;
+    MACAddr[1] = (uint8_t)(h >> 24);
+    MACAddr[2] = (uint8_t)(h >> 16);
+    MACAddr[3] = (uint8_t)(h >> 8);
+    MACAddr[4] = (uint8_t)h;
+    MACAddr[5] = (uint8_t)(u0 ^ u1 ^ u2);
+  }
   /* USER CODE END MACADDRESS */
 
   hal_eth_init_status = HAL_ETH_Init(&heth);
@@ -764,8 +782,14 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t 
     p->tot_len += Length;
   }
 
-  /* Invalidate data cache because Rx DMA's writing to physical memory makes it stale. */
-  SCB_InvalidateDCache_by_Addr((uint32_t *)buff, Length);
+  /* Invalidate data cache because Rx DMA's writing to physical memory makes it
+   * stale. Skipped while the D-cache is off: there is nothing to invalidate, and
+   * every DCIMVAC write is a tag lookup that costs time for no effect. The guard
+   * also means enabling the D-cache in the .ioc restores this automatically. */
+  if ((SCB->CCR & SCB_CCR_DC_Msk) != 0U)
+  {
+    SCB_InvalidateDCache_by_Addr((uint32_t *)buff, Length);
+  }
 
 /* USER CODE END HAL ETH RxLinkCallback */
 }

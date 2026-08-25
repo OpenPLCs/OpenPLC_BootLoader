@@ -43,11 +43,42 @@ _Min_Stack_Size = 0x2000; /* required amount of stack */
 /* Specify the memory areas */
 MEMORY
 {
-  FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 2048K
+  /* The device has 2048K of flash, but only the first 128K belong to the
+     bootloader: the application starts at 0x08020000 (IAP_APP_ADDRESS in
+     Core/Inc/usbd_cdc_flash.h, and build.flash_offset=0x20000 in the Arduino
+     core's platform.txt). Declaring the full 2048K here would let the linker
+     place bootloader code on top of the application without a word of warning.
+     With a bounded region the linker reports "region FLASH overflowed" instead.
+     Raising this limit means raising the application base in all three places
+     at once -- here, usbd_cdc_flash.h, and platform.txt.
+
+     120K, not the full 128K: the last 8K of the bootloader's own sector
+     (0x0801E000..0x0801FFFF) is reserved for the owner record area, which
+     stores which public key this board currently trusts as its root. Same
+     technique as the SRAM4 carve-out below -- the area sits outside every
+     MEMORY region, so the linker cannot place anything there in this image or
+     any future one. That is a guarantee rather than a convention, and it is
+     the point: an owner record overwritten by code would silently drop the
+     board back to the factory root.
+
+     It costs no extra sector. The area is parasitic on a sector the bootloader
+     already owns and does not fill, so the 8K comes out of slack rather than
+     out of code. Current image size and headroom: docs/test/MEASUREMENTS.md
+     (the one place that number lives -- a copy here would go stale unnoticed,
+     which is exactly what happened to the copy that used to be on this line).
+
+     Design: docs/design/OWNERSHIP.md. Plan and steps: docs/work/M1-owner-slot.md.
+     Requirement C10. */
+  FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 120K
   DTCMRAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 128K
   RAM_D1 (xrw)   : ORIGIN = 0x24000000, LENGTH = 512K
   RAM_D2 (xrw)   : ORIGIN = 0x30000000, LENGTH = 288K
-  RAM_D3 (xrw)   : ORIGIN = 0x38000000, LENGTH = 64K
+  /* First 32 bytes of SRAM4 are carved out of the region on purpose: they hold
+     the boot-mode handoff record (see IAPServer/IAP_boot_handoff.h). Because the
+     address is outside every MEMORY region the linker cannot place anything
+     there, in this image or any future one -- a guarantee, not a convention.
+     Keep this identical to the Arduino core's variants/.../ldscript.ld. */
+  RAM_D3 (xrw)   : ORIGIN = 0x38000020, LENGTH = 64K - 32
   ITCMRAM (xrw)  : ORIGIN = 0x00000000, LENGTH = 64K
 }
 
@@ -166,17 +197,45 @@ SECTIONS
     . = ALIGN(8);
   } >RAM_D1
 
-  /* ETH_CODE: add placement of DMA descriptors and RX buffers */
+  /* ETH_CODE: add placement of DMA descriptors and RX buffers.
+   *
+   * Layout of RAM_D2 (288K). The order is deliberate:
+   *
+   *   0x30000000  lwIP heap       131048 + 24            = 131072 B -> 0x3001FFFF
+   *   0x30020000  Rx descriptors  ETH_RX_DESC_CNT(4)  * 24 =    96 B -> 0x3002005F
+   *   0x30020060  Tx descriptors  ETH_TX_DESC_CNT(4)  * 24 =    96 B -> 0x300200BF
+   *   0x30020100  Rx pbuf pool    ETH_RX_BUFFER_CNT(12) * sizeof(RxBuff_t)(32+1536)
+   *                                                      = 18816 B -> 0x30024A7F
+   *   0x30024A80  free: 141K, contiguous
+   *
+   * The heap comes first because an MPU region must be aligned to its own size.
+   * The 128K region that marks the heap non-cacheable can therefore only start
+   * at 0x30000000 or 0x30020000 -- put the descriptors first and the heap is
+   * forced up to 0x30020000, stranding the ~108K in between. Descriptors and
+   * pool are fixed-size, so nothing here moves unless MEM_SIZE changes.
+   *
+   * The heap occupies MEM_SIZE_ALIGNED + 2 * SIZEOF_STRUCT_MEM, not MEM_SIZE:
+   * lwIP adds two 12-byte sentinel headers (mem_size_t becomes u32_t once
+   * MEM_SIZE exceeds 64000). MEM_SIZE 131048 is picked so that 131048 + 24 is
+   * exactly 128K -- raising it without growing the MPU region would push the
+   * heap into the descriptors.
+   *
+   * These three addresses are the single source of truth for where the data
+   * really lives; the ETH_*Address values in the .ioc only feed CubeMX's MPU
+   * region generation. Keep both in step -- and note that an overlap here is
+   * silent, because the lwIP heap is a raw pointer, not a linker section, so ld
+   * cannot catch it.
+   */
   .lwip_sec (NOLOAD) :
   {
-    . = ABSOLUTE(0x30040000);
-    *(.RxDecripSection) 
-    
-    . = ABSOLUTE(0x30040060);
+    . = ABSOLUTE(0x30020000);
+    *(.RxDecripSection)
+
+    . = ABSOLUTE(0x30020060);
     *(.TxDecripSection)
-    
-    . = ABSOLUTE(0x30040200);
-    *(.Rx_PoolSection)  
+
+    . = ABSOLUTE(0x30020100);
+    *(.Rx_PoolSection)
   } >RAM_D2
 
 
