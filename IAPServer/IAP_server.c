@@ -236,7 +236,7 @@ void process_command() {
 			// Same handover, same signature over the same bytes. The wipe form
 			// reclaims sector 15 with a root area holding nothing but the new
 			// record -- the only way to get revocation slots back, so the
-			// operator has to ask for it (OWN-07).
+			// operator has to ask for it.
 			//
 			// No button: the current owner's signature IS the authorisation.
 			const bool wipe = (RXBuffer[8] == (uint8_t)'w');
