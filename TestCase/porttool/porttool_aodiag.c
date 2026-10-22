@@ -1,8 +1,7 @@
 // porttool_aodiag.c
 //
 // *** TEMPORARY diagnostic: remove once the AO noise source is found. ***
-// pt.aodiag - see porttool_aodiag.h. Experiments, probes and how to read the
-// results: $PROD/maps/fixture-test-stages/issues/STG-41-where-does-the-ao-noise-come-from.md
+// pt.aodiag - see porttool_aodiag.h.
 //
 //   E0  DAC static, firmware otherwise idle (interrupts live, CPU spinning)
 //   E1  quiet window: every interrupt masked, tick stopped, ETH stopped, WFI

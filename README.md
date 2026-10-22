@@ -3,7 +3,7 @@
 > This README covers flashing the bootloader onto a board and the Arduino-side
 > installation only.
 >
-> Every document for this product lives in the OpenPLC_Docs repository: this
+> Every document for this product lives in the OpenPLC_Instruction repository: this
 > repository's behaviour and security model, and the requirement and verification
 > status alike. They moved there on 2026-09-16. Do not restate any of it here.
 

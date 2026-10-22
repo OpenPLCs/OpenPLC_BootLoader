@@ -4,7 +4,7 @@
  * Holds what a sector-15 reclaim must not lose while the sector is erased
  * (root area and latest metadata). Survives a main-power cut only with the
  * backup regulator on (PWR_CR2.BREN), which bkp_stash_enable() turns on.
- * Sources: $PROD/maps/root-key-without-bootloader-reflash/ROOT-05-findings.md.
+ * Sources and the reclaim steps: $PROD/docs/modules/M1/SECTOR-15.md, "回收的六步".
  * Ownership of the region: $PROD/docs/repo/ARCHITECTURE.md.
  */
 

@@ -56,6 +56,6 @@ compiler's runtime libraries.
 | `P16` | the I-cache and the flash lock are restored on every exit | `checks/check_icache_is_restored.py` |
 | `P17` | the `.cproject` linker script is still `${PLC_LD_SCRIPT}` | `checks/check_cproject_ld.py` |
 
-Criteria: `OpenPLC_Docs/docs/engineering/HOW-TO-RUN-TESTS.md`. Each multi-step
+Criteria: `OpenPLC_Instruction/docs/engineering/HOW-TO-RUN-TESTS.md`. Each multi-step
 entry runs its steps as separate processes, in order, in its own working
 directory under the build tree (`run_steps.cmake`), so `ctest -j` is safe.

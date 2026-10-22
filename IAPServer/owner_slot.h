@@ -71,7 +71,7 @@
  * whole key. Full P-256 points are effectively random, so 128 bits of prefix
  * make a collision (revoking the wrong leaf, or failing to revoke the right
  * one) astronomically unlikely, and it is what lets a whole record fit in one
- * flash word. See $PROD/maps/owner-revoke-and-boot-upgrade/issues/OWN-01-revoke-by-serial-or-by-pubkey.md. */
+ * flash word. */
 #define OWNER_REVOKE_PREFIX_LEN  16U
 
 /*

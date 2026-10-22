@@ -1,8 +1,7 @@
 // port_aodiag.c
 //
 // *** TEMPORARY diagnostic: remove once the AO noise source is found. ***
-// See port_aodiag.h; documented in
-// $PROD/maps/fixture-test-stages/issues/STG-41-where-does-the-ao-noise-come-from.md
+// See port_aodiag.h.
 
 #include "port_aodiag.h"
 #include "porttool/porttool.h"   /* PORTTOOL_ENABLE */

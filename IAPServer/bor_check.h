@@ -1,6 +1,6 @@
 /*
  * bor_check.h -- is the brown-out reset at the agreed level?
- * Decision: $PROD/maps/iec-61131-2-factory-state/issues/IEC-06-what-happens-on-undervoltage.md.
+ * Decision: $PROD/docs/modules/M1/BOOT-SEQUENCE.md, "开机检查欠压复位（BOR）档位".
  */
 #ifndef BOR_CHECK_H_
 #define BOR_CHECK_H_

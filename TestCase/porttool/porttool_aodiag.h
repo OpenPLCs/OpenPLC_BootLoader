@@ -1,8 +1,7 @@
 // porttool_aodiag.h
 //
 // *** TEMPORARY diagnostic: remove once the AO noise source is found. ***
-// pt.aodiag runs one AO noise experiment (E0..E6). Experiments, probes and how
-// to read them: $PROD/maps/fixture-test-stages/issues/STG-41-where-does-the-ao-noise-come-from.md
+// pt.aodiag runs one AO noise experiment (E0..E6).
 // Not listed in pt.caps.
 
 #ifndef TESTCASE_PORTTOOL_PORTTOOL_AODIAG_H_
