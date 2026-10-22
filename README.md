@@ -1,4 +1,4 @@
-# open-plc
+# OpenPLC_BootLoader
 
 > This README covers flashing the bootloader onto a board and the Arduino-side
 > installation only.
