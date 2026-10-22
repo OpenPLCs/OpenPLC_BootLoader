@@ -4,7 +4,7 @@
  * See boot_log.h. Format: $PROD/docs/modules/M1/BOOT-LOG.md.
  *
  * Mirrored between OpenPLC_BootLoader/IAPServer/ and
- * open_plc_arduino/cores/arduino/stm32/; the two copies differ only in the
+ * OpenPLC_Arduino_PKG/cores/arduino/stm32/; the two copies differ only in the
  * device include (main.h / stm32_def.h). P2 compares the rest (mirror 19).
  */
 

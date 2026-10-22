@@ -6,7 +6,7 @@
  * $PROD/docs/modules/M1/BOOT-LOG.md.
  *
  * Mirrored byte for byte between OpenPLC_BootLoader/IAPServer/ and
- * open_plc_arduino/cores/arduino/stm32/ (mirror 19 in
+ * OpenPLC_Arduino_PKG/cores/arduino/stm32/ (mirror 19 in
  * $PROD/docs/repo/ARCHITECTURE.md, checked by P2).
  */
 

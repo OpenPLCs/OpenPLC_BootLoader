@@ -15,13 +15,13 @@
  * Deliberately independent of owner_slot.h: this module takes the trusted
  * root as a plain argument rather than calling owner_slot_root() itself, so
  * the exact same code can be compiled, unmodified, into a context that has no
- * owner-slot flash to read -- see open_plc_arduino's owner_root_ro.c, which
+ * owner-slot flash to read -- see OpenPLC_Arduino_PKG's owner_root_ro.c, which
  * gets the root a different way and hands it to the same functions here.
  *
  * Revocation works the same way: `leaf_is_revoked` is a plain
  * bool the caller supplies, computed however that caller's environment
  * answers "has this leaf been revoked" (owner_slot_is_revoked() in the
- * bootloader; open_plc_arduino's mirror of the same on-flash records
+ * bootloader; OpenPLC_Arduino_PKG's mirror of the same on-flash records
  * elsewhere). This file never asks the question itself, on purpose -- adding
  * the parameter rather than calling out to owner_slot.h keeps the
  * independence above intact, AND makes a call site that forgets to check

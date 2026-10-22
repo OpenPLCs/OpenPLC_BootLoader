@@ -367,7 +367,7 @@ void process_command() {
 			char noncesig_hex[129] = {0};
 			/* %256s is IAP_CERT_SIZE*2 written out: a scanf field width cannot
 			 * be a macro. Update it by hand with IAP_CERT_SIZE, here and in
-			 * open_plc_arduino's udp_server.c. */
+			 * OpenPLC_Arduino_PKG's udp_server.c. */
 			int nParsed = sscanf((char *)RXBuffer + strlen(verb),
 					" %" SCNu32 " %" SCNx32 " %128s %256s %128s",
 					&expected_size, &expected_checksum, sig_hex, cert_hex, noncesig_hex);
