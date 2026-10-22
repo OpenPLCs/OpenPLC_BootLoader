@@ -42,16 +42,21 @@ uint32_t PortDac_ExpectedMicroamps(uint32_t mv)
     return (mv * 10000U) / PORT_XTR111_RSET_OHM;
 }
 
+void PortDac_RelatchVref(void)
+{
+    uint32_t measured = PortAdc_VddaMeasured() ? PortAdc_VddaMv() : 0U;
+    if (measured != 0U) {
+        dac_vref_mv = measured;
+    }
+}
+
 int PortDac_Init(void)
 {
     if (dac_ready) {
         return 1;
     }
 
-    uint32_t measured = PortAdc_VddaMeasured() ? PortAdc_VddaMv() : 0U;
-    if (measured != 0U) {
-        dac_vref_mv = measured;
-    }
+    PortDac_RelatchVref();
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_DAC12_CLK_ENABLE();

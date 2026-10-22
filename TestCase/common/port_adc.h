@@ -26,6 +26,10 @@
  * failure. Safe to call more than once. */
 int PortAdc_Init(void);
 
+/* Measures VREF+ again (after PortVref_Select), bringing the ADC up if it is
+ * not yet. Returns 0 if the ADC would not start. */
+int PortAdc_Remeasure(void);
+
 /* Measured VDDA in mV; the fallback constant if VREFINT could not be read. */
 uint32_t PortAdc_VddaMv(void);
 

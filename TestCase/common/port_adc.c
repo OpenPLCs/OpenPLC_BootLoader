@@ -145,6 +145,18 @@ int PortAdc_Init(void)
     return 1;
 }
 
+int PortAdc_Remeasure(void)
+{
+    if (!adc_ready) {
+        return PortAdc_Init();
+    }
+    /* A failed measurement must not leave the old reference looking current. */
+    adc_vdda_mv = ADC_VREF_FALLBACK_MV;
+    adc_vdda_measured = 0;
+    PortAdc_MeasureVdda();
+    return 1;
+}
+
 uint32_t PortAdc_VddaMv(void)      { return adc_vdda_mv; }
 int      PortAdc_VddaMeasured(void) { return adc_vdda_measured; }
 

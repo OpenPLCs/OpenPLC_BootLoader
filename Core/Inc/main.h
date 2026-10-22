@@ -56,6 +56,10 @@ void Error_Handler(void);
 /* Write the stdout line still waiting for its newline to the boot log. */
 void boot_log_flush_stdout(void);
 
+/* Ask for the 2 s identify blink on the system LED (R1-44). Safe from IRQ
+ * and lwIP callbacks: it only sets a flag the superloop picks up. */
+void identify_blink_request(void);
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

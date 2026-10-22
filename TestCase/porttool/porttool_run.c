@@ -5,6 +5,7 @@
 #include "porttool_run.h"
 #include "porttool_cmd.h"
 #include "porttool.h"       /* PORTTOOL_ENABLE, PORTTOOL_REPLY_MAX */
+#include "porttool_match.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -16,8 +17,12 @@
 #include "SD/sd_test.h"
 #include "SDRAM/sdram_test.h"
 #include "IAP_boot_handoff.h"   /* the reset cause main() latched at boot */
+#include "port_adc.h"
+#include "port_dac.h"
 #include "port_led.h"
+#include "port_lse.h"
 #include "port_rs485.h"          /* the PD4/PD5 pin map, shared with the session */
+#include "port_vref.h"
 #include "main.h"
 #include "rtc.h"
 
@@ -92,6 +97,104 @@ static void run_rtc_read(const char *args, char *out, uint32_t len)
              (unsigned)__HAL_RTC_IS_CALENDAR_INITIALIZED(&hrtc), clk,
              (unsigned)d.Year, (unsigned)d.Month, (unsigned)d.Date,
              (unsigned)t.Hours, (unsigned)t.Minutes, (unsigned)t.Seconds);
+}
+
+/* Analog reference for the noise comparison (DECISIONS.md 158); the wiring is
+ * done by hand. Without src= it only reports; a bad src= changes nothing. */
+static void run_vref(const char *args, char *out, uint32_t len)
+{
+    char src[8];
+    const char *err = NULL;
+
+    if (PortCmd_GetStr(args, "src", src, sizeof(src))) {
+        int ext = -1;
+        if (strcmp(src, "ext") == 0)      { ext = 1; }
+        else if (strcmp(src, "int") == 0) { ext = 0; }
+        else                              { err = "src_must_be_int_or_ext"; }
+
+        if (ext >= 0) {
+            if (!PortVref_Select(ext)) {
+                err = "vrefbuf_not_ready";
+            } else if (!PortAdc_Remeasure()) {
+                err = "adc_not_ready";
+            } else {
+                PortDac_RelatchVref();
+            }
+        }
+    }
+
+    int n = snprintf(out, len, "src=%s mv=%lu ok=%d",
+                     PortVref_IsExternal() ? "ext" : "int",
+                     (unsigned long)PortAdc_VddaMv(), PortAdc_VddaTrusted());
+    if (err != NULL && n >= 0 && (uint32_t)n < len) {
+        snprintf(out + n, len - (uint32_t)n, " error=%s", err);
+    }
+}
+
+static const char *const lse_drv_names[4] = { "low", "mlow", "mhigh", "high" };
+
+/* LSE drive for checking decision 157's drive and the start-up margin
+ * (DECISIONS.md 159). The drive stays after a reset: LSE runs on VBAT and
+ * nothing can change it while it runs. A drive that does not start falls back
+ * to mlow, or the next boot would wait out the HAL's LSE timeout. */
+static void run_lse(const char *args, char *out, uint32_t len)
+{
+    char s[8];
+    int want = -1, fallback = 0;
+    uint32_t ms = 0;
+    const char *err = NULL;
+
+    if (PortCmd_GetStr(args, "drv", s, sizeof(s))) {
+        for (int i = PORT_LSE_LOW; i <= PORT_LSE_HIGH; i++) {
+            if (strcmp(s, lse_drv_names[i]) == 0) { want = i; }
+        }
+        if (want < 0) { err = "drv_must_be_low_mlow_mhigh_high"; }
+    }
+
+    if (want >= 0 && !PortLse_Restart(want, &ms) && want != PORT_LSE_MLOW) {
+        uint32_t back_ms;
+        (void)PortLse_Restart(PORT_LSE_MLOW, &back_ms);
+        fallback = 1;
+    }
+
+    int n = snprintf(out, len, "drv=%s ready=%d",
+                     lse_drv_names[PortLse_Drive()], PortLse_Ready());
+    if (want >= 0 && n >= 0 && (uint32_t)n < len) {
+        n += snprintf(out + n, len - (uint32_t)n, " start_ms=%lu%s",
+                      (unsigned long)ms, fallback ? " fallback=mlow" : "");
+    }
+    if (err != NULL && n >= 0 && (uint32_t)n < len) {
+        snprintf(out + n, len - (uint32_t)n, " error=%s", err);
+    }
+}
+
+#define LSE_NOMINAL_HZ   32768U
+#define LSE_FREQ_WINDOW_MS 1000U
+
+/* LSE frequency against the HSE-derived timer clock (DECISIONS.md 160); the
+ * HSE error is included, so the panel only records it. */
+static void run_lse_freq(const char *args, char *out, uint32_t len)
+{
+    PortLseFreq f;
+    (void)args;
+
+    int r = PortLse_MeasureFreq(LSE_FREQ_WINDOW_MS, &f);
+    if (r <= 0) {
+        snprintf(out, len, r == 0 ? "ready=0" : "ready=1 error=capture_missed");
+        return;
+    }
+
+    /* Integers only: the fixture's printf has no float support. */
+    uint64_t mhz = ((uint64_t)f.periods * f.tclk_hz * 1000U + f.ticks / 2U) / f.ticks;
+    int64_t diff = (int64_t)((uint64_t)f.periods * f.tclk_hz) - (int64_t)(f.ticks * LSE_NOMINAL_HZ);
+    /* Scaled so a wildly wrong LSE cannot overflow: ppm * 100 = diff / (nominal / 1e8). */
+    int64_t ppm100 = diff * 10000LL / (int64_t)(f.ticks * LSE_NOMINAL_HZ / 10000U);
+    uint64_t mag = (uint64_t)(ppm100 < 0 ? -ppm100 : ppm100);
+
+    snprintf(out, len, "ready=1 hz=%lu.%03lu ppm=%s%lu.%02lu ms=%lu",
+             (unsigned long)(mhz / 1000U), (unsigned long)(mhz % 1000U),
+             ppm100 < 0 ? "-" : "", (unsigned long)(mag / 100U), (unsigned long)(mag % 100U),
+             (unsigned long)f.ms);
 }
 
 #define LED_PULSES     6U
@@ -417,6 +520,10 @@ static const run_target_t targets[] = {
       "PHY identity, link, and the speed/duplex auto-negotiation settled on" },
     { "rtc.read",        "rtc", PORTTOOL_BOARD_BRIDGE, "-", "-",  run_rtc_read,
       "brings the RTC up if needed and reads the calendar; never writes it" },
+    { "lse",             "rtc", PORTTOOL_BOARD_BRIDGE, "-", "-",  run_lse,
+      "LSE drive: drv=low|mlow|mhigh|high restarts LSE and times it; kept after reset" },
+    { "lse.freq",        "rtc", PORTTOOL_BOARD_BRIDGE, "-", "-",  run_lse_freq,
+      "LSE frequency and ppm over about 1 s, against the HSE-derived TIM16 clock" },
     { "sdram.crc",       "sdram", PORTTOOL_BOARD_BRIDGE, "-", "U6",
       run_sdram_crc,
       "CRC32 of one window; reads only, so it checks what a tool wrote there" },
@@ -426,6 +533,8 @@ static const run_target_t targets[] = {
     { "reset.cause",     "reset", PORTTOOL_BOARD_BRIDGE, "-", "-",
       run_reset_cause,
       "why the board last came up - POR, PIN, IWDG, WWDG, SOFT or BOR" },
+    { "vref",            "ain", PORTTOOL_BOARD_UPPER, "D", "D12,D13", run_vref,
+      "analog reference: src=int (VREFBUF 2.5 V) or src=ext (VREF+ wired by hand)" },
     { "led.blink",       "led", PORTTOOL_BOARD_BRIDGE, "-", "-",  run_led_blink,
       "blinks the system indicator on PE2; a person decides whether it lit" },
     { "knx.edges",       "knx", PORTTOOL_BOARD_UPPER, "C", "C03,C04", run_knx_edges,
@@ -434,6 +543,9 @@ static const run_target_t targets[] = {
       "pulse bursts; KNX_RX width and TX->RX delay, min/avg/max and histograms" },
     { "knx.pullup",      "knx", PORTTOOL_BOARD_UPPER, "C", "C03,C04", run_knx_pullup,
       "one burst with PA10's pull-up on, one with it off; leaves it on" },
+    { "match",           "match", PORTTOOL_BOARD_UPPER, "C", "C07,C08,C10,C11",
+      PortMatch_Run,
+      "listens on RS485 and CAN for ms= and reports the OPLC-<n> tokens each heard" },
 };
 #define TARGET_COUNT (sizeof(targets) / sizeof(targets[0]))
 

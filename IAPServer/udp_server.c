@@ -9,6 +9,7 @@
 #include "lwip/ip_addr.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
+#include "main.h"
 #include "IAP_config.h"
 #include "IAP_server.h"
 #include "bootloader_state.h"
@@ -283,6 +284,13 @@ static void udp_server_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
       pbuf_free(p);
     }
     return;
+  }
+
+  /* R1-44 / decision 161: only a request sent to this board alone blinks;
+   * IDE discovery is broadcast and would blink every board on the LAN. */
+  if (!ip_addr_isbroadcast(ip_current_dest_addr(), ip_current_netif()) &&
+      !ip_addr_ismulticast(ip_current_dest_addr())) {
+    identify_blink_request();
   }
 
   char recv_buf[64] = {0};

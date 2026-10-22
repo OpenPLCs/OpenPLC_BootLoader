@@ -22,9 +22,11 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
+#include <stdbool.h>
 #include "porttool/porttool.h"
 #if !PORTTOOL_ENABLE
 #include <IAP_server.h>
+#include "main.h"
 #endif
 /* USER CODE END INCLUDE */
 
@@ -103,6 +105,12 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
  * filled in: the stack returns this handler's buffer as-is, and an unanswered
  * GET_LINE_CODING leaves the host reading uninitialised memory. */
 static USBD_CDC_LineCodingTypeDef LineCoding = { 115200U, 0U, 0U, 8U };
+
+#if !PORTTOOL_ENABLE
+/* DTR as last set by the host; cleared on every (re)configuration so a replug
+ * counts as a new open. */
+static bool s_dtr;
+#endif
 /* USER CODE END PRIVATE_VARIABLES */
 
 /**
@@ -163,6 +171,9 @@ static int8_t CDC_Init_FS(void)
 	/* Set Application Buffers */
 	USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
 	USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
+#if !PORTTOOL_ENABLE
+	s_dtr = false;
+#endif
 	return (USBD_OK);
   /* USER CODE END 3 */
 }
@@ -190,8 +201,9 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
   /* USER CODE BEGIN 5 */
 	/* Line coding layout: bitrate u32 | stop bits u8 | parity u8 | data bits u8.
 	 * Only these two requests are answered; every other class request is
-	 * accepted and ignored. The 1200-baud knock belongs to the application
-	 * image, not here. */
+	 * accepted and ignored, except that DTR going high starts the identify
+	 * blink (R1-44). The 1200-baud knock belongs to the application image,
+	 * not here. */
 	switch (cmd) {
 	case CDC_SET_LINE_CODING:
 		if (length >= 7U) {
@@ -214,6 +226,19 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 		pbuf[5] = LineCoding.paritytype;
 		pbuf[6] = LineCoding.datatype;
 		break;
+
+#if !PORTTOOL_ENABLE
+	case CDC_SET_CONTROL_LINE_STATE: {
+		/* No data stage: pbuf is the setup packet, DTR is wValue bit 0. */
+		bool dtr = (((USBD_SetupReqTypedef*) pbuf)->wValue & 0x0001U) != 0U;
+
+		if (dtr && !s_dtr) {
+			identify_blink_request();
+		}
+		s_dtr = dtr;
+		break;
+	}
+#endif
 
 	default:
 		break;

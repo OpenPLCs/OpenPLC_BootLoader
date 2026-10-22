@@ -112,6 +112,11 @@ void PortTool_AoDiag(const char *args, void (*stop_sessions)(void))
         printf("ERR aodiag scale= must be 0..3\r\n");
         return;
     }
+    /* E3 turns VREFBUF on, which would fight the source wired to VREF+. */
+    if (exp == 3U && PortVref_IsExternal()) {
+        printf("ERR aodiag E3 switches VREFBUF; the external reference is selected\r\n");
+        return;
+    }
     if (PortCmd_GetStr(args, "mv", s, sizeof(s)) && !PortCmd_GetU32(args, "mv", &mv)) {
         printf("ERR aodiag mv= is not a number\r\n");
         return;

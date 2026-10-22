@@ -7,20 +7,23 @@
 #include <stdio.h>
 
 static int vref_on;
+static int vref_external;
 
-int PortVref_Enable(void)
+static void PortVref_Clocks(void)
 {
-    if (vref_on) {
-        return 1;
-    }
-
     /* VREFBUF has its own APB4 clock gate; without it CSR writes are dropped. */
     __HAL_RCC_VREF_CLK_ENABLE();
     __HAL_RCC_SYSCFG_CLK_ENABLE();
+}
+
+static int PortVref_StartInternal(void)
+{
+    PortVref_Clocks();
 
     HAL_SYSCFG_VREFBUF_VoltageScalingConfig(SYSCFG_VREFBUF_VOLTAGE_SCALE0);
-    HAL_SYSCFG_VREFBUF_HighImpedanceConfig(SYSCFG_VREFBUF_HIGH_IMPEDANCE_DISABLE);
-    SET_BIT(VREFBUF->CSR, VREFBUF_CSR_ENVR);
+    /* One write, so coming back from external never passes ENVR=0 HIZ=0,
+     * where VREFBUF pulls VREF+ down. */
+    MODIFY_REG(VREFBUF->CSR, VREFBUF_CSR_HIZ | VREFBUF_CSR_ENVR, VREFBUF_CSR_ENVR);
 
     /* Generous timeout: start-up depends on the VREF+ decoupling. */
     uint32_t start = HAL_GetTick();
@@ -42,4 +45,36 @@ int PortVref_Enable(void)
 
     vref_on = 1;
     return 1;
+}
+
+int PortVref_Enable(void)
+{
+    /* External: VREF+ belongs to the source wired to it; leave VREFBUF off. */
+    if (vref_on || vref_external) {
+        return 1;
+    }
+    return PortVref_StartInternal();
+}
+
+int PortVref_Select(int external)
+{
+    if (!external) {
+        vref_external = 0;
+        return vref_on ? 1 : PortVref_StartInternal();
+    }
+
+    PortVref_Clocks();
+    /* HIZ before ENVR off, for the same reason as above. */
+    SET_BIT(VREFBUF->CSR, VREFBUF_CSR_HIZ);
+    CLEAR_BIT(VREFBUF->CSR, VREFBUF_CSR_ENVR);
+    printf("[VREF] VREFBUF off, VREF+ high impedance for an external reference\r\n");
+
+    vref_on = 0;
+    vref_external = 1;
+    return 1;
+}
+
+int PortVref_IsExternal(void)
+{
+    return vref_external;
 }

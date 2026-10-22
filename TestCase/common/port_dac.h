@@ -37,6 +37,10 @@ int PortDac_Init(void);
 /* The reference the codes below are computed against. */
 uint32_t PortDac_VrefMv(void);
 
+/* Takes the reference from the ADC's latest VREF+ measurement again; the next
+ * PortDac_SetMv() uses it. */
+void PortDac_RelatchVref(void);
+
 /* Drives Analog Out 1 (PA4, terminal D14) or 2 (PA5, D15). Returns 0 if the
  * channel is out of range or the HAL rejected it. */
 int PortDac_SetMv(int ch, uint32_t mv);

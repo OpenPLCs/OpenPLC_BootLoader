@@ -217,6 +217,51 @@ static void status_led_set(bool on)
 	HAL_GPIO_WritePin(STATUS_LED_PORT, STATUS_LED_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
+/* Identify blink (R1-44, decision 161): fast blink for 2 s when the PC opens
+ * the USB port or sends a unicast UDP request; a new request restarts it.
+ * Phase 2 only, so it never overlaps the startup window, and phase 2 leaves
+ * only through a reset, so PE2 needs no restore. Same timing as the app
+ * (board package cores/arduino/openplc_syslog.cpp). */
+#define IDENTIFY_BLINK_MS       2000U
+#define IDENTIFY_BLINK_HALF_MS  50U
+
+static volatile bool s_identify_request;
+
+void identify_blink_request(void)
+{
+	s_identify_request = true;
+}
+
+/* Polled from the superloop; never blocks. */
+static void identify_blink_poll(void)
+{
+	static bool s_blinking;
+	static bool s_on;
+	static uint32_t s_start;
+	static uint32_t s_toggled;
+	uint32_t now = HAL_GetTick();
+
+	if (s_identify_request) {
+		s_identify_request = false;
+		s_blinking = true;
+		s_start = now;
+		s_toggled = now;
+		s_on = true;
+		status_led_set(true);
+	}
+	if (!s_blinking) {
+		return;
+	}
+	if ((now - s_start) >= IDENTIFY_BLINK_MS) {
+		s_blinking = false;
+		status_led_set(false);
+	} else if ((now - s_toggled) >= IDENTIFY_BLINK_HALF_MS) {
+		s_toggled = now;
+		s_on = !s_on;
+		status_led_set(s_on);
+	}
+}
+
 static boot0_gesture_t boot_window(void)
 {
 	uint32_t held_ms;
@@ -425,6 +470,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     IAP_task();
+    identify_blink_poll();
     /* MX_LWIP_Init() only ran for the ethernet modes. */
     if ((s_boot_mode == IAP_ETHERNET) || (s_boot_mode == IAP_ALL)) {
       MX_LWIP_Process();
@@ -442,6 +488,7 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_CRSInitTypeDef RCC_CRSInitStruct = {0};
 
   /** Supply configuration update enable
   */
@@ -456,7 +503,7 @@ void SystemClock_Config(void)
   /** Configure LSE Drive Capability
   */
   HAL_PWR_EnableBkUpAccess();
-  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_MEDIUMLOW);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -498,6 +545,21 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+
+  /** Enable the SYSCFG APB clock
+  */
+  __HAL_RCC_CRS_CLK_ENABLE();
+
+  /** Configures CRS
+  */
+  RCC_CRSInitStruct.Prescaler = RCC_CRS_SYNC_DIV1;
+  RCC_CRSInitStruct.Source = RCC_CRS_SYNC_SOURCE_USB2;
+  RCC_CRSInitStruct.Polarity = RCC_CRS_SYNC_POLARITY_RISING;
+  RCC_CRSInitStruct.ReloadValue = __HAL_RCC_CRS_RELOADVALUE_CALCULATE(48000000,1000);
+  RCC_CRSInitStruct.ErrorLimitValue = 34;
+  RCC_CRSInitStruct.HSI48CalibrationValue = 32;
+
+  HAL_RCCEx_CRSConfig(&RCC_CRSInitStruct);
 }
 
 /* USER CODE BEGIN 4 */
