@@ -196,7 +196,7 @@ already has firmware on it.
 - **The ETS product file is no longer in the board package.**
   `OpenPLC_Bridge.knxprod` is removed; the product for this release is
   `OpenPLC_TP.knxprod` (application version 5, order number `OPENPLC-TP`),
-  downloaded from [OpenPLC_ETS_Prod](https://github.com/haliboteda/OpenPLC_ETS_Prod).
+  downloaded from [OpenPLC_ETS_Prod](https://github.com/OpenPLCs/OpenPLC_ETS_Prod).
 
 ### Sketches that need editing
 
