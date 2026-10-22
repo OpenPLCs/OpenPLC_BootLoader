@@ -23,18 +23,41 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+
 /* Phase 2 peripherals: CubeMX no longer emits their init calls. */
+#include "rng.h"
 #include "rtc.h"
 #include "crc.h"
 #include "fmc.h"
 #include "usb_device.h"
 #include "lwip.h"
 
-#include "relay.h"
 #include "IAP_server.h"
 #include "IAP_boot_handoff.h"
+#include "safe_outputs.h"
+#include "bor_check.h"
 #include "iap_auth.h"
+#include "net_rand.h"
 #include "owner_slot.h"
+#include "bootloader_state.h"
+#include "boot_log.h"
+
+/* Port test tool: the PC-driven instrument panel for the terminals. Turn it
+ * on by defining the symbol in the project's preprocessor settings. */
+#ifndef PORTTOOL_ENABLE
+#define PORTTOOL_ENABLE 0
+#endif
+#if PORTTOOL_ENABLE
+#include "porttool/porttool.h"
+/* The symbol is set by hand rather than by a build configuration, so the one
+ * failure mode is shipping an image with it left on: that board never reaches
+ * the IAP server and cannot be updated over USB or Ethernet. Say so in the
+ * build log, where it is impossible to miss. */
+#warning "PORTTOOL_ENABLE=1: this image is the hardware test tool, NOT a bootloader. It never starts the IAP server."
+#endif
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -81,11 +104,54 @@ static void itm_putchar_bounded(uint8_t ch)
 	}
 }
 
-/* stdout goes to SWO/ITM and RS232, both bounded: a bootloader must never hang
- * on a log line. */
+/* stdout line being collected for the SRAM4 boot log; each line goes in as one
+ * record, BOOT_LOG_TAG_BL included. */
+static char s_log_line[BOOT_LOG_LINE_MAX];
+static size_t s_log_len;
+
+/* A tag with no text after it is a blank line: not worth a record. */
+static void boot_log_flush_stdout_line(void)
+{
+	if (s_log_len > (sizeof(BOOT_LOG_TAG_BL) - 1U)) {
+		(void) boot_log_write(s_log_line, s_log_len);
+	}
+	s_log_len = 0U;
+}
+
+void boot_log_flush_stdout(void)
+{
+	(void) fflush(stdout);
+	boot_log_flush_stdout_line();
+}
+
+static void boot_log_putc(char ch)
+{
+	if (ch == '\n') {
+		boot_log_flush_stdout_line();
+		return;
+	}
+	if (ch == '\r') {
+		return;
+	}
+	if (s_log_len == 0U) {
+		memcpy(s_log_line, BOOT_LOG_TAG_BL, sizeof(BOOT_LOG_TAG_BL) - 1U);
+		s_log_len = sizeof(BOOT_LOG_TAG_BL) - 1U;
+	}
+	s_log_line[s_log_len++] = ch;
+	if (s_log_len == sizeof(s_log_line)) {
+		boot_log_flush_stdout_line();
+	}
+}
+
+/* stdout goes to SWO/ITM and the boot log, never to the RS232 terminals
+ * (R1-43). Both are bounded: a bootloader must never hang on a log line.
+ * The port test tool alone also uses UART4, its command and log channel. */
 PUTCHAR_PROTOTYPE {
 	itm_putchar_bounded((uint8_t) ch);
+	boot_log_putc((char) ch);
+#if PORTTOOL_ENABLE
 	(void) HAL_UART_Transmit(&huart4, (uint8_t*) &ch, 1, 10);
+#endif
 	return ch;
 }
 /* USER CODE END PFP */
@@ -96,19 +162,22 @@ PUTCHAR_PROTOTYPE {
 /* What server_decide() settled on. Phase 2 and the superloop key off it. */
 static IAP_Method s_boot_mode = IAP_NONE;
 
-/* Startup window: the relay clicks are the operator's cue to press BOOT0.
- * 3 relays x 500 ms = 1.5 s, then one read.
+/* Startup window: the system LED blinking is the operator's cue to press BOOT0.
+ * It blinks for 2 s, then BOOT0 is read once.
  *
- * ⚠️ The judgement is "was the button down at the 1.5 s mark", NOT "was it
- * held for 1.5 s". BOOT0 is not looked at while the relays click. Holding the
- * button throughout is just the practical way to be sure of covering that one
+ * No relay, DO or AO moves during boot: a load wired to one would be switched
+ * at every power-up (DECISIONS.md #71, IEC 61131-2:2003 6.3.1.4).
+ *
+ * ⚠️ The judgement is "was the button down at the 2 s mark", NOT "was it held
+ * for 2 s". BOOT0 is not looked at while the LED blinks. Holding the button
+ * throughout is just the practical way to be sure of covering that one
  * instant, which is what the banner is really telling the operator to do. */
-#define BOOT0_WINDOW_MS        500U
-#define BOOT0_WINDOW_RELAYS    3U
+#define BOOT0_WINDOW_MS_TOTAL  2000U
+#define BOOT0_WINDOW_BLINK_MS  100U
 
 /* Keep holding past the decision point and it becomes a second gesture:
- * factory reset (requirement C10, module M1). Ten seconds is far enough from
- * the 1.5 s mark that nobody reaches it by holding "a bit longer to be sure". */
+ * factory reset (requirement R2-02). Ten seconds is far enough from
+ * the 2 s mark that nobody reaches it by holding "a bit longer to be sure". */
 #define BOOT0_FACTORY_HOLD_MS  10000U
 
 /* A button that never reads as released is a stuck button or a shorted net.
@@ -118,38 +187,54 @@ static IAP_Method s_boot_mode = IAP_NONE;
 
 #define BOOT0_POLL_MS          10U
 
+/* System LED, high = on. Pin: $PROD/docs/hardware/HARDWARE-FACTS.md, "PE2".
+ * Not in the .ioc, so configured here; HAL_DeInit() at the jump to the app
+ * resets GPIOE, so the app still gets a cold pin (R3-02). */
+#define STATUS_LED_PORT        GPIOE
+#define STATUS_LED_PIN         GPIO_PIN_2
+
 typedef enum {
 	BOOT0_GESTURE_NONE = 0,       /* not down at the decision point            */
-	BOOT0_GESTURE_UPLOAD,         /* down at 1.5 s, released before 10 s       */
+	BOOT0_GESTURE_UPLOAD,         /* down at 2 s, released before 10 s         */
 	BOOT0_GESTURE_FACTORY_RESET   /* held past 10 s, then released             */
 } boot0_gesture_t;
 
-/*
- * Three fast clicks: "the factory-reset gesture is armed, let go now".
- *
- * Audible rather than visual on purpose. This board has no general-purpose
- * LED, and it is usually inside a cabinet where nobody can see one anyway --
- * the relay clicks are already how the startup window announces itself.
- */
-static void boot0_armed_signal(void)
+static void status_led_init(void)
 {
-	for (uint32_t i = 0U; i < 3U; i++) {
-		Relay_On((RELAY_Name) 0);
-		HAL_Delay(60U);
-		Relay_Off((RELAY_Name) 0);
-		HAL_Delay(60U);
-	}
+	GPIO_InitTypeDef init = {0};
+
+	__HAL_RCC_GPIOE_CLK_ENABLE();
+	HAL_GPIO_WritePin(STATUS_LED_PORT, STATUS_LED_PIN, GPIO_PIN_RESET);
+	init.Pin = STATUS_LED_PIN;
+	init.Mode = GPIO_MODE_OUTPUT_PP;
+	init.Pull = GPIO_NOPULL;
+	init.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(STATUS_LED_PORT, &init);
 }
 
-static boot0_gesture_t boot_window_relay(void)
+static void status_led_set(bool on)
+{
+	HAL_GPIO_WritePin(STATUS_LED_PORT, STATUS_LED_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static boot0_gesture_t boot_window(void)
 {
 	uint32_t held_ms;
 	bool armed = false;
 
-	for (uint32_t i = 0U; i < BOOT0_WINDOW_RELAYS; i++) {
-		Relay_On((RELAY_Name) i);
-		HAL_Delay(BOOT0_WINDOW_MS);
-		Relay_Off((RELAY_Name) i);
+	status_led_init();
+
+	/* Printed BEFORE the window, not after: if the board resets partway
+	 * through it, the line for the interrupted attempt still reaches the log
+	 * and the restart shows up as a second one. */
+	printf("Startup window: system LED blinking for %u s\r\n",
+			(unsigned)(BOOT0_WINDOW_MS_TOTAL / 1000U));
+
+	for (uint32_t t = 0U; t < BOOT0_WINDOW_MS_TOTAL; t += 2U * BOOT0_WINDOW_BLINK_MS) {
+		status_led_set(true);
+		HAL_Delay(BOOT0_WINDOW_BLINK_MS);
+		status_led_set(false);
+		HAL_Delay(BOOT0_WINDOW_BLINK_MS);
 	}
 
 	if (boot0_is_pressed() == 0U) {
@@ -163,27 +248,28 @@ static boot0_gesture_t boot_window_relay(void)
 			"or let go now for upload mode **\r\n",
 			(unsigned)(BOOT0_FACTORY_HOLD_MS / 1000U));
 
-	held_ms = BOOT0_WINDOW_RELAYS * BOOT0_WINDOW_MS;
+	held_ms = BOOT0_WINDOW_MS_TOTAL;
 	while (boot0_is_pressed() != 0U) {
 		if (!armed && (held_ms >= BOOT0_FACTORY_HOLD_MS)) {
 			armed = true;
-			boot0_armed_signal();
+			/* Steady light: "the factory-reset gesture is armed, let go now". */
+			status_led_set(true);
 			printf("** Factory reset ARMED - release BOOT0 to run it, "
 					"or reset the board to cancel **\r\n");
-			/* The clicks take time of their own; count it. */
-			held_ms += 6U * 60U;
 			continue;
 		}
 		if (held_ms >= BOOT0_HOLD_LIMIT_MS) {
 			printf("** BOOT0 still down after %u s - treating it as stuck, "
 					"continuing in upload mode **\r\n",
 					(unsigned)(BOOT0_HOLD_LIMIT_MS / 1000U));
+			status_led_set(false);
 			return BOOT0_GESTURE_UPLOAD;
 		}
 		HAL_Delay(BOOT0_POLL_MS);
 		held_ms += BOOT0_POLL_MS;
 	}
 
+	status_led_set(false);
 	return armed ? BOOT0_GESTURE_FACTORY_RESET : BOOT0_GESTURE_UPLOAD;
 }
 
@@ -202,6 +288,11 @@ int main(void)
    * test that keeps us from reading never-written ECC SRAM depends on it. */
   boot_handoff_latch_reset_cause();
 
+  /* Every DO off and both AO at 0 mA before anything else runs: MPU, caches,
+   * HAL_Init() and the PLL lock below all take time with the pins floating.
+   * Decision 81; $PROD/docs/modules/M1/BOOT-SEQUENCE.md. */
+  safe_outputs_init();
+
   /* Enable the three configurable fault exceptions. Left at their reset default
    * they stay disabled and every MemManage / BusFault / UsageFault escalates to
    * HardFault, so IT_Fault_Report() can only ever report "HardFault" and the
@@ -209,7 +300,7 @@ int main(void)
    * Enabled, each fault takes its own vector and the report names it directly.
    *
    * First statement in main(): SCB needs no clock and no init, so this covers
-   * the whole boot. A fault before MX_UART4_Init() still reports over SWO/ITM. */
+   * the whole boot. A fault before boot_log_init() still reports over SWO/ITM. */
   SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk | SCB_SHCSR_BUSFAULTENA_Msk
               | SCB_SHCSR_USGFAULTENA_Msk;
 
@@ -221,6 +312,11 @@ int main(void)
    * it is safe on an uninitialised cache; SCB_EnableDCache() opens with the same
    * step for the same reason. Costs tens of microseconds, once. */
   SCB_InvalidateDCache();
+
+  /* After the cache pass (it cleans by address) and before the first printf.
+   * A power-on reset leaves SRAM4 unwritten, so the buffer is only read on a
+   * warm boot. $PROD/docs/modules/M1/BOOT-LOG.md */
+  boot_log_init((boot_handoff_reset_rsr() & RCC_RSR_PORRSTF) != 0U);
 
   /* USER CODE END 1 */
 
@@ -247,18 +343,34 @@ int main(void)
 
   /* Phase 1: decide. Only what the decision itself needs is brought up here, so
    * the application inherits none of our peripheral state on the jump path. */
+  /* RS232_Enable is left low: the bootloader never powers the transceiver or
+   * touches UART4, the RS232 terminals belong to the sketch (R1-43). */
   MX_GPIO_Init();      /* BOOT0 net, relay outputs, RS232_Enable */
-  BOOT0_ConfigureAsInput();  /* undo the generated output config on PG9 */
+#if PORTTOOL_ENABLE
+  /* The port test tool alone uses UART4: its command channel and its log. */
   Enable_RX_RS232();   /* the MAX3221 stays in shutdown until this pin is high */
   MX_UART4_Init();
+#endif
+  bor_level_report();   /* first thing the log can show: IEC-06 */
+
+#if PORTTOOL_ENABLE
+  /* Takes the board for the whole session and never returns, so the BOOT0
+   * gesture, the start decision, the jump to app and the IAP server below are
+   * all unreachable in this image. */
+  PortTool_Run();
+#endif
 
   printf("** Checking Starting Mod ...\r\n"
-		  "** (IF You want OpenPLC to stay in upload mode, please hold down the BOOT0 button for 3-5 seconds while clicking)\r\n");
+		  "** (IF You want OpenPLC to stay in upload mode, hold down the BOOT0 button until the system LED stops blinking)\r\n");
 
   printf("** Reset cause: %s\r\n", boot_handoff_reset_cause_str());
 
   {
-    boot0_gesture_t gesture = boot_window_relay();
+    boot0_gesture_t gesture = boot_window();
+
+    /* Before anything reads the root area: finishes a sector-15 reclaim a
+     * power cut interrupted. */
+    bootloader_state_init();
 
     if (gesture == BOOT0_GESTURE_FACTORY_RESET) {
       /* ⚠️ BEFORE server_decide(), because that is where the owner slot is
@@ -288,10 +400,9 @@ int main(void)
 
   /* Phase 2: staying in the bootloader. */
 
-  /* MX_GPIO_Init() above drove RS232_Enable low again. */
-  Enable_RX_RS232();
-
-  MX_RTC_Init();   /* iap_auth's nonce counter lives in a backup register */
+  MX_RNG_Init();   /* iap_auth draws the challenge nonce from it */
+  net_rand_seed(); /* before MX_LWIP_Init(): lwIP's LWIP_RAND() is rand() */
+  MX_RTC_Init();   /* backup-domain witness */
   iap_auth_report_backup_domain();
   MX_CRC_Init();   /* upload checksum */
   MX_FMC_Init();   /* external SDRAM: staging area for the incoming image */
@@ -342,13 +453,18 @@ void SystemClock_Config(void)
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
+  /** Configure LSE Drive Capability
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_LSI
-                              |RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSE
+                              |RCC_OSCILLATORTYPE_LSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;

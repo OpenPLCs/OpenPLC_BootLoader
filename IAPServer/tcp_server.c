@@ -1,8 +1,5 @@
 /*
- * tcp_server_simple.c
- *
- *  Created on: May 7, 2025
- *      Author: WhoamIamwhO
+ * tcp_server.c -- the single-session TCP command channel.
  */
 
 #include <IAP_config.h>
@@ -42,6 +39,8 @@ static void tcp_server_close(struct tcp_pcb *pcb) {
 		client_pcb = NULL;
 		reset_buf();
 		TCP_PRINT("Client disconnected.");
+	} else {
+		TCP_PRINT("Closed a non-owning connection.");
 	}
 }
 
@@ -56,6 +55,7 @@ static err_t _recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
 	if (pcb != client_pcb) {
 		/* Not the owning session: drop the data instead of mixing it into
 		 * the image being received. */
+		TCP_PRINT("Dropped %u bytes from a non-owning connection", (unsigned)p->tot_len);
 		tcp_recved(pcb, p->tot_len);
 		pbuf_free(p);
 		return ERR_OK;
@@ -140,7 +140,6 @@ void tcp_server_start(void) {
 
 	server_pcb = tcp_listen(server_pcb);
 	tcp_accept(server_pcb, _accept);
-	// TCP_PRINT("Server listening on port %d", OPENPLC_SERVER_PORT);
 }
 
 
@@ -160,5 +159,7 @@ void tcp_server_send(uint8_t* data, uint16_t len) {
 		} else {
 			TCP_PRINT("tcp_write failed: %d\n", err);
 		}
+	} else if (!client_pcb) {
+		TCP_PRINT("Dropped a response: no client connected");
 	}
 }

@@ -32,7 +32,7 @@ uint16_t Flash_If_Write(uint8_t *DataAddress, uint8_t *FlashAddress, uint32_t Le
  *         banks.)
  * @param  Add: Address of sector to be erased.
  * @param NbSectors: number of sectors
- * @retval 0 if operation is successful, MAL_FAIL else.
+ * @retval HAL_OK (0) on success, otherwise non-zero.
  */
 uint16_t Flash_If_Erase(uint32_t Add, uint32_t NbSectors)
 {
@@ -84,38 +84,51 @@ uint16_t Flash_If_Erase(uint32_t Add, uint32_t NbSectors)
  * @param  DataAddress specifies the address of data to be programmed.
  *         This parameter shall be 32-bit aligned
  * @param  Len: Number of data to be written (in bytes).
- * @retval 0 if operation is successful, MAL_FAIL else.
+ * @retval HAL_OK (0) on success, otherwise non-zero.
  */
 
 uint16_t Flash_If_Write(uint8_t *DataAddress, uint8_t *FlashAddress, uint32_t Len)
 {
-  uint32_t i = 0;
+  uint32_t i;
+  uint16_t result = HAL_OK;
+
   SCB_DisableICache();
   HAL_FLASH_Unlock();
 
   for (i = 0; i < Len; i += 32)
   {
-    /* Device voltage range supposed to be [2.7V to 3.6V], the operation will
-     * be done by byte */
+    uint32_t w;
+
     if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD, (uint32_t)(FlashAddress + i),
-                          (uint32_t)(DataAddress + i)) == HAL_OK)
-    {
-      /* Check the written value */
-      if (*(uint64_t *)(DataAddress + i) != *(uint64_t *)(FlashAddress + i))
-      {
-        /* Flash content doesn't match SRAM content */
-        return 2;
-      }
-    }
-    else
+                          (uint32_t)(DataAddress + i)) != HAL_OK)
     {
       /* Error occurred while writing data in Flash memory */
-      return HAL_ERROR;
+      result = HAL_ERROR;
+      break;
+    }
+
+    /* Read the whole flash word back. One program call commits all 32 bytes,
+     * so comparing just the first 8 would let a word that went wrong past the
+     * eighth byte pass as written. */
+    for (w = 0U; w < 32U; w += 8U)
+    {
+      if (*(uint64_t *)(DataAddress + i + w) != *(uint64_t *)(FlashAddress + i + w))
+      {
+        /* Flash content doesn't match SRAM content */
+        result = 2;
+        break;
+      }
+    }
+    if (result != HAL_OK)
+    {
+      break;
     }
   }
+
+  /* One exit, so the lock and the I-cache are restored on every path. */
   HAL_FLASH_Lock();
   SCB_EnableICache();
-  return HAL_OK;
+  return result;
 }
 
 /**
@@ -217,12 +230,11 @@ static uint32_t GetGlobalSectorIndex(uint32_t Address)
  * @brief  Erase Flash.
  * @param  flashAddress: flash address to be written to.
  * @param  Len: Number of data to be written (in bytes).
- * @retval 0 if operation is successful, MAL_FAIL else.
+ * @retval HAL_OK (0) on success, otherwise non-zero.
  */
 uint16_t Erase_FLASH(uint8_t *flashAddress, uint32_t Len)
 {
-  // never erase into the reserved tail sector (bootloader state: firmware
-  // metadata + tamper-evident event log)
+  // never erase into the reserved tail sector (bootloader state, sector 15)
   if ((uint32_t)flashAddress + Len > IAP_STATE_SECTOR_ADDR)
   {
     return HAL_ERROR;
@@ -243,27 +255,6 @@ uint16_t Erase_FLASH(uint8_t *flashAddress, uint32_t Len)
   HAL_StatusTypeDef status = Flash_If_Erase((uint32_t)flashAddress, NbSectors);
   if (status != HAL_OK)
   {
-    //printf("There is error when erasing flash. Addr:%x Sectors:%d Status:%d\r\n", flashAddress, NbSectors, status);
-    return HAL_ERROR;
-  }
-  //printf("Erasing flash Done. Addr:%x Sectors:%d\r\n", flashAddress, NbSectors);
-  return HAL_OK;
-}
-
-/**
- * @brief  Writes Data into Flash.
- * @param  dataAddress: Data Address .
- * @param  flashAddress: flash address to be written to.
- * @param  Len: Number of data to be written (in bytes).
- * @retval 0 if operation is successful, MAL_FAIL else.
- */
-
-uint16_t Write_FLASH(uint8_t *dataAddress, uint8_t *flashAddress, uint32_t Len)
-{
-  HAL_StatusTypeDef status = Flash_If_Write(dataAddress, flashAddress, Len);
-  if (status != HAL_OK)
-  {
-//    printf("There is error when writing flash. Addr:%x Data:%x Status:%d", flashAddress, dataAddress, status);
     return HAL_ERROR;
   }
   return HAL_OK;

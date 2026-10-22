@@ -1,63 +1,50 @@
 /*
- * ota_processor.c
- *
- *  Created on: Apr 30, 2025
- *      Author: ziotier
+ * IAP_server.c -- IAP command state machine and the boot decision.
  */
 #include <inttypes.h>
 #include "IAP_server.h"
 #include "tcp_server.h"
 #include "udp_server.h"
 #include "crc.h"
-#include "md5.h"
 #include "sha256.h"
 #include "fw_verify.h"
-#include "fw_pubkey.h"
+#include "iap_cert.h"
 #include "owner_slot.h"
 #include "bootloader_state.h"
+#include "safe_outputs.h"
 #include "iap_auth.h"
 #include "iap_keyderive.h"
 #include "IAP_boot_handoff.h"
 
 #include "main.h"
 
-#include "usart.h"          /* huart4, de-initialised before jumping to the app */
+#include "fmc.h"            /* iap_sdram_selftest_passed(), for the reject text */
+#include "lwip/netif.h"     /* netif_default, to notice a link that never came up */
 #include "usbd_cdc_flash.h"
 
 #include "usbd_cdc_if.h"
-
-pFunction JumpToApplication;
+#include "boot_selfupgrade.h"
 
 uint32_t expected_size;
 uint32_t expected_checksum;
 static uint8_t expected_signature[FW_SIGNATURE_SIZE];
 static bool have_expected_signature;
-static uint32_t expected_version; /* 0 if the flash command didn't carry one (older PC tool) */
-static bool s_boot0_held;         /* BOOT0 was down at this boot's decision point */
+static iap_cert_t expected_cert;   /* the leaf cert that (claims to) authorise expected_signature */
+static bool s_staging_is_bootloader; /* this transfer is a flashboot, not a flash */
 
-// volatile: written from IAP_data_recv() (USB/lwIP receive callback context)
-// and read/cleared from IAP_task() (main superloop context) -- without it
-// the compiler is free to assume nothing outside the current function
-// changes these between accesses.
-volatile uint8_t data_is_ready = 0; // 0 - no 1 - yes
-volatile uint32_t len_in_RX_buffer = 0;    // received data length in buffer
-uint8_t RXBuffer[IAP_RX_BUFFER_SIZE]; // buffer to receive data
-volatile uint32_t received_bytes = 0; // received Bytes of Flash bin file
+/* volatile: written from the USB/lwIP receive callbacks, read and cleared
+ * from the superloop. */
+volatile uint8_t data_is_ready = 0;
+volatile uint32_t len_in_RX_buffer = 0;
+uint8_t RXBuffer[IAP_RX_BUFFER_SIZE];
+volatile uint32_t received_bytes = 0;   /* image bytes staged so far */
 
-//uint8_t FlashBuffer[IAP_RX_BUFFER_SIZE];
-//uint32_t LenInFlashBuffer = 0;
 volatile IAP_STATUS current_status = IDLE;
 
 static IAP_Method current_method = IAP_NONE;
 
-//
-extern uint32_t _sdata, _edata;
-extern uint32_t _sbss, _ebss;
-extern uint32_t _estack;
 extern uint16_t Erase_FLASH(uint8_t *flashAddress, uint32_t Len);
-extern uint16_t Flash_If_Write(uint8_t *DataAddress, uint8_t *FlashAddress,
-		uint32_t Len);
-//
+
 uint32_t app_base, app_msp, app_reset;
 
 /* The staging buffer has to hold the largest image the app region accepts, plus
@@ -67,16 +54,9 @@ _Static_assert(IAP_STAGE_SIZE >= (uint32_t)IAP_APP_MAX_SIZE + 32U,
 
 /*
  * Erase the application region and copy the verified image out of SDRAM.
- *
- * Only reached once the staged image has passed both CRC and signature, which is
- * the entire point of staging: this is the first moment the currently-installed
- * application is at risk, and the exposure lasts the erase plus the write rather
- * than the whole transfer.
- *
- * On failure the app region is left half-written with stale metadata still
- * describing the old image, so the next boot reports an invalid application and
- * asks for another upload -- the same recoverable state an interrupted transfer
- * used to leave behind.
+ * Only reached once the staged image has passed CRC and signature. On failure
+ * the stale metadata no longer matches the app region, so the next boot stays
+ * in the bootloader and asks for another upload.
  */
 static bool stage_commit_to_flash(void) {
 	/* HAL_FLASH_Program always consumes a full 32-byte flash word, so the copy
@@ -110,14 +90,20 @@ void reset_buf(void) {
 	memset(RXBuffer, 0, IAP_RX_BUFFER_SIZE); //
 	current_status = IDLE;
 	current_method = IAP_NONE;
+	s_staging_is_bootloader = false;
 }
 
-// 接口特定的发送响应
+/* Reply on the channel the current command came in on. */
 void send_response(char *msg) {
 	switch (current_method) {
-	case IAP_CDC:
-		CDC_Transmit_FS((uint8_t*) msg, strlen(msg));
+	case IAP_CDC: {
+		uint8_t st = CDC_Transmit_FS((uint8_t*) msg, strlen(msg));
+		if (st != USBD_OK) {
+			printf("CDC_Transmit_FS failed (%u), response \"%s\" not sent\r\n",
+					(unsigned)st, msg);
+		}
 		break;
+	}
 	case IAP_ETHERNET:
 		tcp_server_send((uint8_t*) msg, strlen(msg));
 		break;
@@ -156,12 +142,33 @@ void iap_identity_string(char *out, uint32_t out_len)
 {
 	char uid_hex[IAP_MACHINE_ID_HEX_LEN + 1U] = {0};
 	/* Split on "_" by the PC tool (parseBoardInfoFromReply), so no field may
-	 * contain one. */
+	 * contain one. Five fields: name_uid_role_pkgversion_appversion.
+	 *
+	 * The last field is "-", not a version: only a running application knows
+	 * which sketch version is installed, and by the time the bootloader is
+	 * answering, it is not running. Writing 0.0.0 here would read as a real
+	 * version rather than an absent one. The tool keys off `role` anyway --
+	 * it only compares versions when the answer came from CUSAPP.
+	 *
+	 * The core builds the same string in libraries/OpenPLC_IAP/src/udp_server.c
+	 * and the two cannot share code; the pair is a tracked cross-repo mirror
+	 * (see $PROD/docs/repo/ARCHITECTURE.md, checked by P2). */
 	const char *role = bootloader_state_app_is_valid() ? UDP_SERVER_NAME : UDP_SERVER_NAME "-INVALID";
 
 	iap_keyderive_get_machine_id_hex(uid_hex);
-	(void)snprintf(out, out_len, "%s_%s_%s_%s",
-			OPENPLC_DEVICE_NAME, uid_hex, role, OPENPLC_FW_VERSION);
+	(void)snprintf(out, out_len, "%s_%s_%s_%s_%s",
+			OPENPLC_DEVICE_NAME, uid_hex, role, OPENPLC_FW_VERSION, "-");
+}
+
+/* TCP/CDC keep their prefix match; the reply text comes from the builder UDP
+ * uses too (udp_server.c, mirror 21). */
+static void send_query_reply(const char *name)
+{
+	char reply[IAP_QUERY_REPLY_MAX];
+
+	if (iap_query_reply(name, reply, sizeof(reply))) {
+		send_response(reply);
+	}
 }
 
 void process_command() {
@@ -169,7 +176,7 @@ void process_command() {
 		// check the command type
 		if (strncmp((char *)RXBuffer, "openplc_server_where_r_y", 24) == 0) {
 			// Same string the UDP discovery reply carries, so a PC tool identifies
-			// a board the same way on both channels: name_uid_role_version, with
+			// a board the same way on both channels (see iap_identity_string()), with
 			// role telling BOOTLD from BOOTLD-INVALID.
 			char identity[96];
 			iap_identity_string(identity, sizeof(identity));
@@ -180,47 +187,23 @@ void process_command() {
 			send_response(BOOT_LOADER_VERSION);
 		} else if (strncmp((char *)RXBuffer, "authchallenge", 13) == 0) {
 			char nonce_hex[IAP_AUTH_NONCE_SIZE * 2U + 1U];
-			iap_auth_issue_challenge(nonce_hex);
-			send_response(nonce_hex);
-		} else if (strncmp((char *)RXBuffer, "getuid", 6) == 0) {
-			// Lets a PC tool connected over CDC (no discovery reply available)
-			// learn this device's machine ID, needed to derive its device key
-			// before an authchallenge/flash exchange.
-			char uid_hex[IAP_MACHINE_ID_HEX_LEN + 1U];
-			iap_keyderive_get_machine_id_hex(uid_hex);
-			send_response(uid_hex);
-		} else if (strncmp((char *)RXBuffer, "getversion", 10) == 0) {
-			// Lets the PC tool learn the version currently installed *before*
-			// committing to a flash command, so it can warn the operator
-			// about a downgrade in its own console. The bootloader itself
-			// never refuses a downgrade -- that decision is the operator's.
-			iap_fw_metadata_t meta;
-			char verbuf[16];
-			uint32_t v = bootloader_state_get_metadata(&meta) ? meta.fw_version : 0U;
-			snprintf(verbuf, sizeof(verbuf), "%" PRIu32, v);
-			send_response(verbuf);
-		} else if (strncmp((char *)RXBuffer, "getpubkey", 9) == 0) {
-			// Lets the PC tool confirm its signing key matches the key this
-			// bootloader verifies against, before it spends time sending an
-			// image that would be rejected at the end.
-			//
-			// owner_slot_root(), not fw_public_key: on a claimed board those
-			// differ, and answering with the built-in key would make the tool
-			// compare against a key this board no longer trusts -- refusing
-			// good images and accepting bad ones, both silently.
-			const uint8_t *root = owner_slot_root();
-			char pubhex[64 * 2U + 1U];
-			uint32_t i;
-			for (i = 0; i < 64U; i++) {
-				(void)sprintf(&pubhex[i * 2U], "%02x", root[i]);
+			/* No nonce rather than a predictable one: without a challenge the
+			 * caller simply cannot authorize anything, which is the safe end. */
+			if (iap_auth_issue_challenge(nonce_hex)) {
+				send_response(nonce_hex);
+			} else {
+				send_response("ERR");
 			}
-			send_response(pubhex);
+		} else if (strncmp((char *)RXBuffer, "getuid", 6) == 0) {
+			send_query_reply("getuid");
+		} else if (strncmp((char *)RXBuffer, "getpubkey", 9) == 0) {
+			send_query_reply("getpubkey");
 		} else if (strncmp((char *)RXBuffer, "takeown ", 8) == 0) {
 			// "takeown <128 hex chars>" -- bind this board to a signing key.
 			//
-			// Only ever the FIRST claim. Changing an existing owner needs the
-			// current owner's signature and is a different command (M1 step 5),
-			// because this one is gated by physical presence alone.
+			// Only while the board has no root, over any channel, no button
+			// (decision 72). Changing an existing owner needs the current
+			// owner's signature and is a different command (setowner).
 			uint8_t key[64];
 			const char *hex = (const char *)RXBuffer + 8;
 			uint32_t i;
@@ -236,25 +219,28 @@ void process_command() {
 			}
 			if (!ok) {
 				send_response("Bad key");
-			} else if (owner_slot_claim(key, s_boot0_held)) {
+			} else if (owner_slot_claim(key)) {
 				send_response("OK");
 			} else {
 				send_response("Refused");
 			}
 		} else if (strncmp((char *)RXBuffer, "getowner", 8) == 0) {
-			// Generation of the record in force, 0 when unclaimed. The host
-			// needs it to build the next record's signed prefix -- both sides
-			// must agree on the exact bytes, and the generation is in them.
-			char genbuf[16];
-			snprintf(genbuf, sizeof(genbuf), "%" PRIu32, owner_slot_generation());
-			send_response(genbuf);
-		} else if (strncmp((char *)RXBuffer, "setowner ", 9) == 0) {
+			send_query_reply("getowner");
+		} else if (strncmp((char *)RXBuffer, "getapprevoked", 13) == 0) {
+			send_query_reply("getapprevoked");
+		} else if ((strncmp((char *)RXBuffer, "setownerwipe ", 13) == 0)
+				|| (strncmp((char *)RXBuffer, "setowner ", 9) == 0)) {
 			// "setowner <generation> <newkey_hex> <sig_hex>"
+			// "setownerwipe <generation> <newkey_hex> <sig_hex>"
 			//
-			// No BOOT0 here, deliberately: the current owner's signature IS the
-			// authorisation, and handing a board over remotely is a case the
-			// design supports. Physical presence gates only the operations that
-			// have no signature to check -- the first claim and factory reset.
+			// Same handover, same signature over the same bytes. The wipe form
+			// reclaims sector 15 with a root area holding nothing but the new
+			// record -- the only way to get revocation slots back, so the
+			// operator has to ask for it (OWN-07).
+			//
+			// No button: the current owner's signature IS the authorisation.
+			const bool wipe = (RXBuffer[8] == (uint8_t)'w');
+			const char *const verb = wipe ? "setownerwipe" : "setowner";
 			uint32_t gen = 0U;
 			char keyhex[129];
 			char sighex[129];
@@ -263,7 +249,7 @@ void process_command() {
 			bool ok = true;
 			uint32_t i;
 
-			if (sscanf((char *)RXBuffer + 9, "%" SCNu32 " %128s %128s",
+			if (sscanf((char *)RXBuffer + strlen(verb), " %" SCNu32 " %128s %128s",
 					&gen, keyhex, sighex) != 3) {
 				send_response("Bad args");
 			} else if ((strlen(keyhex) != 128U) || (strlen(sighex) != 128U)) {
@@ -281,27 +267,110 @@ void process_command() {
 				}
 				if (!ok) {
 					send_response("Bad hex");
+				} else if (wipe) {
+					// Success resets without a reply, as the tool expects
+					// (IAP-PROTOCOL.md); "Refused" means nothing was erased.
+					static owner_carry_t wipe_carry;
+					if (owner_slot_build_wipe_carry(gen, key, sig, &wipe_carry)
+							&& bootloader_state_reclaim(&wipe_carry)) {
+						printf("setownerwipe done. Rebooting...\r\n");
+						fflush(stdout);
+						HAL_Delay(200);
+						HAL_NVIC_SystemReset();
+					}
+					send_response("Refused");
 				} else if (owner_slot_set_owner(gen, key, sig)) {
 					send_response("OK");
 				} else {
 					send_response("Refused");
 				}
 			}
-		} else if (strncmp((char *)RXBuffer, "flash", 5) == 0) {
-			// decode flash command: "flash <size> <crc32hex> <signature_hex> <hmac_hex> [version]"
-			// - signature_hex: 64-byte ECDSA r||s from IAPTool sign / IAPTool cdc (128 hex chars)
-			// - hmac_hex: HMAC-SHA256(auth_key, nonce || "flash <size> <crc32hex> <signature_hex>[ <version>]")
-			//   for the nonce most recently returned by "authchallenge" (32 hex chars)
-			// - version: optional decimal firmware version; omitted by older PC
-			//   tools, in which case it's saved as 0 (no rollback comparison
-			//   possible for that image, same as before this field existed)
+		} else if (strncmp((char *)RXBuffer, "revoke ", 7) == 0) {
+			// "revoke <leaf_prefix_hex> <sig_hex>"
+			//
+			// leaf_prefix_hex names ONE leaf: the first OWNER_REVOKE_PREFIX_LEN
+			// bytes of its public key, 32 hex chars. One 'R' record holds
+			// exactly one name (decision I-D3: batching was declined).
+			//
+			// No BOOT0, same reasoning as setowner: the current owner's
+			// signature IS the authorisation.
+			//
+			// No generation on the wire either: an 'R' record is not a link in
+			// the ownership chain, so it has no position in one (decision 59).
+			char leafhex[(OWNER_REVOKE_PREFIX_LEN * 2U) + 1U];
+			char sighex[129];
+			uint8_t leaf_prefix[OWNER_REVOKE_PREFIX_LEN];
+			uint8_t sig[64];
+			bool ok = true;
+			bool already = false;
+			uint32_t i;
+
+			if (sscanf((char *)RXBuffer + 7, "%32s %128s",
+					leafhex, sighex) != 2) {
+				send_response("Bad args");
+			} else if ((strlen(leafhex) != (OWNER_REVOKE_PREFIX_LEN * 2U)) ||
+					(strlen(sighex) != 128U)) {
+				send_response("Bad length");
+			} else {
+				memset(leaf_prefix, 0, sizeof(leaf_prefix));
+				for (i = 0U; i < OWNER_REVOKE_PREFIX_LEN; i++) {
+					unsigned int lb;
+					if (sscanf(&leafhex[i * 2U], "%2x", &lb) != 1) {
+						ok = false;
+						break;
+					}
+					leaf_prefix[i] = (uint8_t)lb;
+				}
+				for (i = 0U; ok && (i < 64U); i++) {
+					unsigned int sb;
+					if (sscanf(&sighex[i * 2U], "%2x", &sb) != 1) {
+						ok = false;
+						break;
+					}
+					sig[i] = (uint8_t)sb;
+				}
+				if (!ok) {
+					send_response("Bad hex");
+				} else if (owner_slot_revoke(leaf_prefix, sig, &already)) {
+					// "already" keeps a repeat call honest: it succeeded, but
+					// nothing was written. IAPTool matches on "OK", so the
+					// extra words reach the operator without changing the
+					// verdict.
+					send_response(already ? "OK already revoked" : "OK");
+				} else {
+					send_response("Refused");
+				}
+			}
+		} else if ((strncmp((char *)RXBuffer, "flashboot ", 10) == 0)
+				|| (strncmp((char *)RXBuffer, "flash ", 6) == 0)) {
+			// decode flash command:
+			//   "flash <size> <crc32hex> <signature_hex> <cert_hex> <noncesig_hex>"
+			// - signature_hex: 64-byte ECDSA r||s over the image, by the cert's
+			//   leaf key (128 hex chars)
+			// - cert_hex: the IAP_CERT_SIZE-byte certificate naming that leaf key
+			//   (IAP_CERT_SIZE*2 hex chars) -- see iap_cert.h
+			// - noncesig_hex: 64-byte ECDSA r||s, by the same leaf key, over
+			//   sha256(nonce || "flash <size> <crc32hex> <signature_hex>") for the
+			//   nonce most recently returned by "authchallenge" (128 hex chars)
+			//
+			// "flashboot" is the same frame with a different destination: it
+			// replaces the bootloader in sector 0 and its image signature is
+			// checked against the owner root rather than the cert's leaf. Everything else -- staging, CRC,
+			// session auth, replay -- is this one path.
+			// $PROD/docs/modules/M1/FLASHBOOT.md.
+			const bool is_bootloader = (RXBuffer[5] == (uint8_t)'b');
+			const char *const verb = is_bootloader ? "flashboot" : "flash";
+			const uint32_t size_limit = is_bootloader
+					? boot_selfupgrade_max_size() : (uint32_t)IAP_APP_MAX_SIZE;
 			char sig_hex[129] = {0};
-			char hmac_hex[65] = {0};
-			uint32_t parsed_version = 0U;
-			int nParsed = sscanf((char *)RXBuffer, "flash %" SCNu32 " %" SCNx32 " %128s %64s %" SCNu32,
-					&expected_size, &expected_checksum, sig_hex, hmac_hex, &parsed_version);
-			bool haveVersion = (nParsed == 5);
-			expected_version = haveVersion ? parsed_version : 0U;
+			char cert_hex[(IAP_CERT_SIZE * 2U) + 1U] = {0};
+			char noncesig_hex[129] = {0};
+			/* %256s is IAP_CERT_SIZE*2 written out: a scanf field width cannot
+			 * be a macro. Update it by hand with IAP_CERT_SIZE, here and in
+			 * open_plc_arduino's udp_server.c. */
+			int nParsed = sscanf((char *)RXBuffer + strlen(verb),
+					" %" SCNu32 " %" SCNx32 " %128s %256s %128s",
+					&expected_size, &expected_checksum, sig_hex, cert_hex, noncesig_hex);
 
 			have_expected_signature = false;
 			if (nParsed >= 3) {
@@ -313,23 +382,26 @@ void process_command() {
 			}
 
 			bool authOk = false;
-			uint8_t hmacBytes[IAP_AUTH_HMAC_SIZE];
-			if ((nParsed == 4 || nParsed == 5) && have_expected_signature
-					&& hex_decode(hmac_hex, hmacBytes, IAP_AUTH_HMAC_SIZE)) {
+			uint8_t noncesigBytes[FW_SIGNATURE_SIZE];
+			if (nParsed == 5 && have_expected_signature
+					&& hex_decode(cert_hex, (uint8_t *)&expected_cert, IAP_CERT_SIZE)
+					&& hex_decode(noncesig_hex, noncesigBytes, FW_SIGNATURE_SIZE)) {
 				char authMsg[220];
-				int authMsgLen = haveVersion
-						? snprintf(authMsg, sizeof(authMsg), "flash %" PRIu32 " %" PRIx32 " %s %" PRIu32,
-								expected_size, expected_checksum, sig_hex, parsed_version)
-						: snprintf(authMsg, sizeof(authMsg), "flash %" PRIu32 " %" PRIx32 " %s",
-								expected_size, expected_checksum, sig_hex);
-				authOk = iap_auth_verify_and_consume((const uint8_t *)authMsg, (uint32_t)authMsgLen, hmacBytes);
+				int authMsgLen = snprintf(authMsg, sizeof(authMsg), "%s %" PRIu32 " %" PRIx32 " %s",
+						verb, expected_size, expected_checksum, sig_hex);
+				authOk = iap_auth_verify_and_consume((const uint8_t *)authMsg, (uint32_t)authMsgLen,
+						&expected_cert, noncesigBytes);
 			}
 
 			if (nParsed >= 2) {
-				if (expected_size == 0 || expected_size > IAP_APP_MAX_SIZE) {
-					printf("Invalid flash size %" PRIu32 ", app region only has %" PRIu32 " bytes\r\n",
-							expected_size, (uint32_t)IAP_APP_MAX_SIZE);
+				if (expected_size == 0 || expected_size > size_limit) {
+					printf("Invalid %s size %" PRIu32 ", the target region only has %" PRIu32 " bytes\r\n",
+							verb, expected_size, size_limit);
 					send_response("ERR");
+				} else if (owner_slot_root() == NULL) {
+					/* No root, nothing can authorise an image: claim first. */
+					printf("%s refused: this board has no root - claim it first\r\n", verb);
+					send_response("Refused");
 				} else if (!have_expected_signature) {
 					// no valid signature was provided -- refuse before erasing
 					// anything, so a rejected/malformed upload can never
@@ -337,24 +409,26 @@ void process_command() {
 					printf("flash command missing/invalid signature - refusing to erase\r\n");
 					send_response("ERR");
 				} else if (!authOk) {
+					printf("flash command failed authentication - refusing\r\n");
 					send_response("ERR");
-					/* RAM only: this is the one rejection path an unauthenticated
+					/* Log only: this is the one rejection path an unauthenticated
 					 * caller can reach, so it must never touch Flash. */
-					bootloader_state_note_auth_fail((uint32_t)current_method,
-							tcp_server_get_client_ip(), HAL_GetTick());
+					bootloader_state_note_auth_fail(tcp_server_get_client_ip());
 				} else {
-					/* Nothing is erased here any more: the image goes to SDRAM
-					 * first and the app region is only touched once it has
-					 * passed CRC and signature. So a rejected, corrupt or
-					 * interrupted upload leaves the running app alone. */
+					/* Nothing is erased yet: the image is staged in SDRAM and
+					 * the app region is only touched once it has passed CRC
+					 * and signature. */
 					printf("File size %" PRIu32 ", checksum %" PRIx32 ". Staging in SDRAM.\r\n",
 	                        expected_size, expected_checksum);
 					received_bytes = 0;
+					s_staging_is_bootloader = is_bootloader;
 					current_status = FLASH_RECEIVE;
 					send_response("OK");
 				}
 			} else {
-				printf("Invalid flash command");
+				printf("Invalid %s command: only %d of the required size+checksum fields parsed\r\n",
+						verb, nParsed);
+				send_response("ERR");
 			}
 		} else {
 			send_response("Unknown command");
@@ -367,8 +441,6 @@ void process_command() {
 		if (received_bytes + len_in_RX_buffer > IAP_STAGE_SIZE) {
 			printf("Staging overflow: %" PRIu32 " + %" PRIu32 " exceeds %" PRIu32 " bytes. Aborting.\r\n",
 					received_bytes, len_in_RX_buffer, (uint32_t)IAP_STAGE_SIZE);
-			bootloader_state_log_event(IAP_EVT_OVERFLOW_ABORT, (uint32_t)current_method,
-					tcp_server_get_client_ip(), HAL_GetTick(), iap_auth_get_counter());
 			/* Answer before resetting: reset_buf() clears current_method, and
 			 * send_response() routes on it -- afterwards the reply goes nowhere. */
 			send_response("Failed");
@@ -384,26 +456,30 @@ void process_command() {
 			send_response("OK");
 		}
 
-		// 检查是否传输完成
+		/* Whole image staged? */
 		if (received_bytes >= expected_size) {
 			printf("Transfer complete, verifying the staged image...\r\n");
 
 			/* CRC, hash and signature are all computed over the staging buffer.
 			 * Flash is not touched until every one of them has passed. */
 			uint32_t caledCRC = HAL_CRC_Calculate(&hcrc, (uint32_t *)IAP_STAGE_BASE, expected_size);
-			uint32_t peer_ip = tcp_server_get_client_ip();
-			uint32_t nowTick = HAL_GetTick();
-			uint32_t authCtr = iap_auth_get_counter();
 
 			if (expected_checksum != ~caledCRC) {
 				printf("Checksum FAIL. Expected: %08" PRIX32 ", Got: %08" PRIX32 "\r\n",
 						expected_checksum, ~caledCRC);
-				send_response("Checksum Failed");
-				bootloader_state_log_event(IAP_EVT_CRC_FAIL, (uint32_t)current_method, peer_ip, nowTick, authCtr);
+				/* Name the staging buffer when it is the likely cause. The
+				 * self-test already says so on the log port, but whoever is
+				 * upgrading may only be watching the upload channel, where a
+				 * bare "Checksum Failed" sends them after their own image
+				 * first. See $PROD/docs/modules/M1-firmware-upgrade.md. */
+				if (!iap_sdram_selftest_passed()) {
+					send_response("Checksum Failed - SDRAM staging buffer failed its self-test");
+				} else {
+					send_response("Checksum Failed");
+				}
 			} else if (!have_expected_signature) {
 				printf("No valid signature was provided with this upload - refusing to trust it.\r\n");
 				send_response("No Signature");
-				bootloader_state_log_event(IAP_EVT_SIG_FAIL, (uint32_t)current_method, peer_ip, nowTick, authCtr);
 			} else if (!bootloader_state_crypto_selftest_passed()) {
 				// Same precondition server_decide() applies to the boot-time
 				// check (Step 1) -- don't trust a signature verification
@@ -411,26 +487,45 @@ void process_command() {
 				// already found broken at boot.
 				printf("Crypto self-test failed earlier - refusing to trust signature verification.\r\n");
 				send_response("Signature Failed");
-				bootloader_state_log_event(IAP_EVT_SIG_FAIL, (uint32_t)current_method, peer_ip, nowTick, authCtr);
 			} else {
 				uint8_t hash[32];
 				/* Hashes the staging buffer, not the app region -- the app region
 				 * still holds the previous image at this point. */
 				bootloader_state_hash_app(IAP_STAGE_BASE, expected_size, hash);
-				if (!fw_verify_signature(hash, expected_signature)) {
-					printf("Signature verification FAILED - firmware not trusted. "
-							"Application region untouched.\r\n");
+				/* A bootloader image answers to the owner root itself. A leaf
+				 * certificate authorises applications; replacing the bootloader
+				 * is the same weight of act as handing over ownership.
+				 * $PROD/docs/modules/M1/FLASHBOOT.md. */
+				const uint8_t *root = owner_slot_root();
+				if ((root == NULL)
+						|| (s_staging_is_bootloader
+						? !fw_verify_signature_with_key(root, hash, expected_signature)
+						: !iap_cert_verify_image(hash, expected_signature, &expected_cert,
+							root, owner_slot_is_revoked(expected_cert.leaf_pubkey)))) {
+					printf("Signature verification FAILED - firmware not trusted "
+							"(bad signature, or the leaf has been revoked). "
+							"%s untouched.\r\n",
+							s_staging_is_bootloader ? "Bootloader" : "Application region");
 					send_response("Signature Failed");
-					bootloader_state_log_event(IAP_EVT_SIG_FAIL, (uint32_t)current_method, peer_ip, nowTick, authCtr);
+				} else if (s_staging_is_bootloader) {
+					/* Does not come back: it resets, because the code that
+					 * called it no longer exists once the sector is rewritten.
+					 * It returns only for failures it catches before erasing. */
+					(void)boot_selfupgrade_commit(expected_size);
+					/* Only reached when it refused before erasing. A successful
+					 * one resets, which the tool reads the same way it reads the
+					 * end of an ordinary flash. */
+					send_response("Flash Failed");
 				} else if (!stage_commit_to_flash()) {
 					printf("The image was good but the flash write was not - "
 							"retry the upload.\r\n");
 					send_response("Flash Failed");
-					bootloader_state_log_event(IAP_EVT_FLASH_WRITE_FAIL, (uint32_t)current_method, peer_ip, nowTick, authCtr);
 				} else {
 					printf("Checksum and signature OK. Rebooting...\r\n");
-					bootloader_state_save_metadata(expected_size, expected_version, hash, expected_signature);
-					bootloader_state_log_event(IAP_EVT_UPDATE_OK, (uint32_t)current_method, peer_ip, nowTick, authCtr);
+					bootloader_state_save_metadata(expected_size, expected_signature, &expected_cert);
+					/* No "OK": the reset below takes the MAC down before the
+					 * reply leaves, so the tool confirms success by watching
+					 * the board come back. See $PROD/docs/modules/M1-firmware-upgrade.md. */
 					HAL_Delay(500);
 					HAL_NVIC_SystemReset();
 				}
@@ -445,25 +540,15 @@ void process_command() {
 
 /*
  * Raw, silent read of the BOOT0 / KNX-programming button (SW2 on PG9). Silent
- * because the caller polls it throughout the startup relay window. Reads the
- * pin as MX_GPIO_Init() left it; HIGH means pressed.
+ * because the caller polls it while the button stays down after the boot
+ * window. Reads the pin as MX_GPIO_Init() left it; HIGH means pressed.
  */
 uint8_t boot0_is_pressed(void) {
 	return (HAL_GPIO_ReadPin(BOOT0_GPIO_Port, BOOT0_Pin) == GPIO_PIN_SET) ? 1U : 0U;
 }
-// __set_MSP() from inside an ordinary C function is unsafe if anything else
-// in that function runs afterward: the compiler doesn't know the hardware
-// stack pointer just moved, and still emits its normal epilogue (restoring
-// callee-saved registers and deallocating locals) relative to the *old*
-// stack. If that epilogue instead executes after MSP already points at the
-// jumped-to app's fresh stack, "restore/deallocate" becomes "read garbage
-// past the top of the app's RAM" -- which is exactly what was happening
-// here: server_jump_to_app()'s compiler-generated epilogue (`add sp,#0xA0` +
-// `ldmia sp!,{r4-r9,sl,lr}`) ran *after* MSP had already been set to
-// app_msp, corrupting SP to app_msp+0xA0 (0x240800A0, just past the end of
-// AXI SRAM) and bus-faulting on the register pop. A naked function has no
-// compiler-generated prologue/epilogue at all, so nothing can run between
-// setting MSP and jumping.
+/* Naked: no compiler epilogue may run between setting MSP and the jump, or it
+ * pops registers relative to the app's fresh stack and bus-faults. */
+#ifndef IAP_SERVER_HOST_TEST
 __attribute__((naked)) static void jump_to_app(uint32_t msp, uint32_t reset_vector)
 {
 	__asm volatile (
@@ -474,6 +559,12 @@ __attribute__((naked)) static void jump_to_app(uint32_t msp, uint32_t reset_vect
 		"bx r1\n"
 	);
 }
+#else
+/* The PC stand-in has no Cortex-M to jump into; it ends this boot and starts
+ * the application half instead. $PROD/docs/engineering/BOOTLOADER-STAND-IN.md */
+void iap_server_host_jump_to_app(uint32_t msp, uint32_t reset_vector);
+#define jump_to_app iap_server_host_jump_to_app
+#endif
 
 /*
  * Phase 1 of the boot sequence: decide whether this reset runs the application
@@ -486,18 +577,12 @@ __attribute__((naked)) static void jump_to_app(uint32_t msp, uint32_t reset_vect
  * inherits almost none of our state. "Never initialised" cannot be got wrong,
  * whereas a de-init list has to be maintained by hand and silently rots.
  *
- * Deliberately does not jump: the caller owns that step (server_jump_to_app) so
- * it can do its own work first, such as the startup beep.
+ * Deliberately does not jump: the caller owns that step (server_jump_to_app).
  */
 IAP_Method server_decide(uint8_t boot0Pressed) {
 	IAP_Method mode = IAP_NONE;
 	boot_req_t req;
 	bool app_signature_valid = false;
-
-	/* Remembered for the whole session: takeown needs to know the operator was
-	 * physically present, and by the time a command arrives over the network
-	 * they have long since let the button go. */
-	s_boot0_held = (boot0Pressed != 0U);
 
 	bootloader_state_init();
 
@@ -515,9 +600,9 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
 	 * cause. It consumes the record, so a stale request can never pin us here. */
 	req = boot_handoff_take();
 
-	/* boot0Pressed is latched by the caller across the whole startup relay
-	 * window, not sampled here: reading the pin once at this point would need
-	 * the operator to already be holding the button a few milliseconds after
+	/* boot0Pressed is read by the caller at the end of the boot window, not
+	 * sampled here: reading the pin once at this point would need the operator
+	 * to already be holding the button a few milliseconds after
 	 * reset, which is not a reaction time a human has. A press decides the
 	 * outcome on its own -- see the branch below. */
 	const char *reason = "";
@@ -525,31 +610,43 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
 	printf(boot0Pressed ? "BOOT0 button is pressed!\r\n"
 	                    : "BOOT0 button is not pressed.\r\n");
 
-	// Is the app region's actual content the one that was signed and accepted
-	// at the last successful update? This replaces the old "does the MSP
-	// value merely look like a plausible RAM address" heuristic, which could
-	// not tell a legitimate app from corrupted or maliciously-written flash
-	// as long as the first word happened to look like a stack pointer.
-	if (bootloader_state_crypto_selftest_passed()) {
+	/* Is the app region's actual content the one that was signed and accepted
+	 * at the last successful update? */
+	if (bootloader_state_crypto_selftest_passed() && (owner_slot_root() != NULL)) {
 		iap_fw_metadata_t meta;
 		if (bootloader_state_get_metadata(&meta) && meta.app_size > 0U && meta.app_size <= IAP_APP_MAX_SIZE) {
 			uint8_t hash[32];
 			bootloader_state_hash_app(app_base, meta.app_size, hash);
-			app_signature_valid = fw_verify_signature(hash, meta.signature);
+			/* Re-checks meta.cert's root_sig too, not just the leaf signature --
+			 * that is what makes a setowner handover retroactively invalidate
+			 * firmware certified by the old owner: the stored cert's root_sig
+			 * only verifies against the root that signed it, and owner_slot_root()
+			 * has since moved on.
+			 *
+			 * Revocation deliberately does NOT take part here: a revoked leaf's
+			 * already-installed image keeps booting, and revocation only blocks
+			 * the next upload. Revoking asks whether a person is still trusted,
+			 * and a colleague leaving must not stop the machines they once
+			 * touched. $PROD/docs/tables/DECISIONS.md, decision 60.
+			 *
+			 * The operator is not left blind: "getapprevoked" reports the
+			 * boolean this call no longer consumes (decision 63). */
+			app_signature_valid = iap_cert_verify_image(hash, meta.signature, &meta.cert,
+					owner_slot_root(), false);
 		}
 	}
 	bootloader_state_set_app_valid(app_signature_valid);
 
 	if (boot0Pressed > 0U) {
 		/* The physical escape hatch wins outright. Whoever held the button
-		 * through the relay window wants the bootloader, so nothing else gets
-		 * a vote -- not the handoff request, not the signature. We cannot know
+		 * at the end of the boot window wants the bootloader, so nothing else
+		 * gets a vote -- not the handoff request, not the signature. We cannot know
 		 * which channel they will use, so serve all of them.
 		 *
 		 * The two reads above still had to happen: boot_handoff_take() is what
 		 * consumes the request record (leaving it would pin the *next* boot
-		 * here), and the signature result feeds the startup beep and the UDP
-		 * server name, neither of which is part of this decision. */
+		 * here), and the signature result feeds the UDP server name and
+		 * getapprevoked, neither of which is part of this decision. */
 		mode = IAP_ALL;
 		reason = "BOOT0 held";
 	} else {
@@ -571,15 +668,6 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
 		default:
 			if (!app_signature_valid) {
 				printf("** App signature invalid or absent - staying in bootloader **\r\n");
-				/* Only the first boot in a run of failures is recorded: this path
-				 * needs no credential, so logging every power-up would let anyone
-				 * with a power switch fill the journal and push older evidence out.
-				 * Counter is 0 here by definition: no challenge has been issued
-				 * this boot, and the RTC is not initialised until Phase 2. */
-				if (bootloader_state_last_log_event() != (uint32_t)IAP_EVT_BOOT_VERIFY_FAIL) {
-					bootloader_state_log_event(IAP_EVT_BOOT_VERIFY_FAIL, (uint32_t)IAP_NONE, 0U,
-							HAL_GetTick(), 0U);
-				}
 				mode = IAP_ALL;
 				reason = "no valid application";
 			}
@@ -587,10 +675,9 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
 		}
 	}
 
-	/* current_method tracks the channel actually in use and is (re)set by
-	 * IAP_data_recv() as soon as a command arrives. Pre-seed it for the
-	 * single-channel modes to keep the old behaviour; IAP_ALL has no single
-	 * channel yet, so leave it until the first command says which one. */
+	/* current_method is (re)set by IAP_data_recv() when a command arrives.
+	 * Pre-seed it for the single-channel modes; IAP_ALL waits for the first
+	 * command to say which channel. */
 	if ((mode == IAP_CDC) || (mode == IAP_ETHERNET)) {
 		current_method = mode;
 	}
@@ -608,9 +695,8 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
  * Hand the hardware back and jump. Only valid when server_decide() returned
  * IAP_NONE, and only on the boot path -- a completed upload resets instead (see
  * process_command()), which is what keeps the I-cache out of the picture.
- *
- * There is no MX_USB_DEVICE_DeInit() here any more: on this path USB was never
- * brought up in the first place.
+ * USB, ethernet and FMC are never brought up on this path, so they need no
+ * de-init.
  */
 void server_jump_to_app(void) {
 	/* Give the application a clean slate. Our MPU regions describe the
@@ -619,18 +705,9 @@ void server_jump_to_app(void) {
 	 * write, so unlike a peripheral de-init there is nothing to forget. */
 	HAL_MPU_Disable();
 
-	/* UART4 is the only peripheral Phase 1 brought up (for the boot log). Its
-	 * MspDeInit also releases the PC10/PC11 pins; the MAX3221 enable is a plain
-	 * GPIO and has to be handed back separately, so the application starts with
-	 * the transceiver in the same shutdown state a cold board has.
-	 *
-	 * Order matters: shut the transceiver down BEFORE releasing the pins.
-	 * MspDeInit leaves PC10 -- the MAX3221's data input -- floating, and a
-	 * floating input on a still-powered transceiver drives whatever it picks up
-	 * onto the line. Doing it the other way round put a garbage byte in front of
-	 * the application's first log line (docs/work/ISSUES.md ISS-A2). */
-	Disable_RX_RS232();
-	HAL_UART_DeInit(&huart4);
+	/* No UART or transceiver to hand back: the bootloader never opens them
+	 * (R1-43). A last line without its newline would otherwise be lost. */
+	boot_log_flush_stdout();
 
 	__disable_irq();
 
@@ -639,17 +716,30 @@ void server_jump_to_app(void) {
 	SysTick->LOAD = 0;
 	SysTick->VAL = 0;
 
+	HAL_RCC_DeInit();
+	HAL_DeInit();
+
+	/* Leave nothing on that a cold board has off (decision 4): HAL_RCC_DeInit()
+	 * re-arms the TIM6 time base, and the clock enables below survive both
+	 * DeInits. See $PROD/docs/modules/M3-app-runtime.md R3-02. */
+	__HAL_RCC_TIM6_CLK_DISABLE();
+	__HAL_RCC_SYSCFG_CLK_DISABLE();
+	RCC->AHB4ENR = 0U;   /* GPIOA-K, BKPRAM: reset value; safe_outputs_init() re-enables its ports */
+	HAL_PWR_DisableBkUpAccess();
+
 	/* clear interrupt pending -- NVIC->ICER/ICPR are 8 words (256 IRQs,
 	 * the ARMv7-M architectural max), not 16; looping past 8 wrote into
-	 * the reserved padding between register banks. */
+	 * the reserved padding between register banks. After the DeInits, which
+	 * enable the TIM6 IRQ again. */
 	for (uint32_t i = 0; i < 8; i++) {
 		NVIC->ICER[i] = 0xFFFFFFFFU;
 		NVIC->ICPR[i] = 0xFFFFFFFFU;
 	}
 
-	/* */
-	HAL_RCC_DeInit();
-	HAL_DeInit();
+	/* HAL_DeInit() just reset every GPIO port, so the outputs float again: drive
+	 * them back to 0 and leave them for the sketch's first write. The one
+	 * exception to the cold-board handover (decision 4), decision 81. */
+	safe_outputs_init();
 
 	/* Hand back a cold cache. No-op while the I-cache is off, and correct the
 	 * moment it is switched on in the .ioc -- the application must not inherit
@@ -667,8 +757,30 @@ void server_jump_to_app(void) {
  * lwIP already initialised; CDC needs no server object at all, because
  * usbd_cdc_if.c calls IAP_data_recv() straight from the USB receive callback.
  */
+#define IAP_LINK_REPORT_MS 5000U
+static bool s_link_report_pending;
+static uint32_t s_link_report_start;
+
+/* Say so when the link is still not usable 5 s after the channels opened.
+ * ethernetif.c returns silently when LAN8742_Init() fails, in a CubeMX region,
+ * so the report has to happen here. Not earlier: right after lwIP init the PHY
+ * is often still auto-negotiating. See $PROD/docs/modules/M1/BOOT-SEQUENCE.md. */
+static void IAP_link_report(void) {
+	if (!s_link_report_pending
+			|| (HAL_GetTick() - s_link_report_start) < IAP_LINK_REPORT_MS) {
+		return;
+	}
+	s_link_report_pending = false;
+	if ((netif_default == NULL) || !netif_is_link_up(netif_default)) {
+		printf("** Ethernet link is DOWN - this board will not answer discovery. **\r\n"
+		       "** Check the cable; if it is in, the PHY did not initialise. **\r\n");
+	}
+}
+
 void IAP_servers_start(IAP_Method mode) {
 	if ((mode == IAP_ETHERNET) || (mode == IAP_ALL)) {
+		s_link_report_pending = true;
+		s_link_report_start = HAL_GetTick();
 		tcp_server_start();
 		openplc_udp_server_start();
 	}
@@ -678,6 +790,7 @@ void IAP_servers_start(IAP_Method mode) {
 static volatile uint32_t s_idle_rx_last_tick;
 
 void IAP_task(void) {
+	IAP_link_report();
 	if (data_is_ready > 0) {
 		data_is_ready = 0;
 		process_command();
@@ -703,20 +816,11 @@ void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len) {
 		len_in_RX_buffer += copyLen;
 		s_idle_rx_last_tick = HAL_GetTick();
 
-		// A text command is framed by a trailing '\n' or '\r' (see
-		// IAPTranfer_Tool's SendCommandReadResponse/SendCommandWaitForResponse
-		// and the TCP sendCommand* helpers, which send '\n'; either is
-		// accepted so a raw terminal whose Enter key only sends '\r' still
-		// works). Without this, a command longer than one USB CDC packet or
-		// one TCP segment -- e.g. "flash <size> <crc32> <128-hex-sig>
-		// <64-hex-hmac>", ~214 bytes -- can arrive split across several
-		// IAP_data_recv() calls; overwriting RXBuffer from offset 0 on every
-		// call (the old behavior) meant only the LAST fragment survived by
-		// the time process_command() ran, which is why "flash" landed as
-		// "Unknown command" the first time this was tested end-to-end on
-		// real hardware. Waiting for a terminator (or the buffer filling up,
-		// as a safety net) fixes that; IAP_task()'s stale-buffer check
-		// handles a terminator that never arrives at all.
+		// A text command ends at '\n' or '\r' (IAPTool sends '\n'; a raw
+		// terminal may send only '\r'). The "flash" command (~610 bytes)
+		// spans several USB packets / TCP segments, so fragments accumulate
+		// until the terminator or a full buffer; IAP_task() drops a partial
+		// command that never gets one.
 		if (memchr(RXBuffer, '\n', len_in_RX_buffer) != NULL
 				|| memchr(RXBuffer, '\r', len_in_RX_buffer) != NULL
 				|| len_in_RX_buffer >= IAP_RX_BUFFER_SIZE) {
@@ -724,16 +828,11 @@ void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len) {
 			printf("IDLE ready \r\n");
 		}
 	} else {
-
-		//printf("--LenInRXBuffer %d : Len %d \r\n", LenInRXBuffer, Len);
-
 		uint32_t remaining = IAP_RX_BUFFER_SIZE - len_in_RX_buffer;
 		if (Len > remaining) {
 			printf("RX overflow: Len %" PRIu32 " exceeds remaining buffer %" PRIu32 ". Aborting transfer.\r\n",
 					Len, remaining);
 			send_response("ERR");
-			bootloader_state_log_event(IAP_EVT_OVERFLOW_ABORT, (uint32_t)current_method,
-					tcp_server_get_client_ip(), HAL_GetTick(), iap_auth_get_counter());
 			reset_buf();
 			fflush(stdout);
 			return;
@@ -742,13 +841,9 @@ void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len) {
 		memcpy(RXBuffer + len_in_RX_buffer, Buf, Len);
 		len_in_RX_buffer += Len;
 
-//		printf("--LenInRXBuffer %d : receivedBytes %d of %d \r\n",
-//				LenInRXBuffer, receivedBytes, expected_size);
-
-		// all data received or receive length reach the buffer size
+		// Hand over when the buffer is full or the image is complete.
 		if (len_in_RX_buffer >= IAP_RX_BUFFER_SIZE
 				|| received_bytes + len_in_RX_buffer >= expected_size) {
-			// buffer is full
 			data_is_ready = 1;
 			printf("Data is ready to FLash LenInRXBuffer %"PRIu32 " : received %"PRIu32 " of %"PRIu32 " \r\n",
 					len_in_RX_buffer, received_bytes, expected_size);

@@ -52,24 +52,10 @@ MEMORY
      Raising this limit means raising the application base in all three places
      at once -- here, usbd_cdc_flash.h, and platform.txt.
 
-     120K, not the full 128K: the last 8K of the bootloader's own sector
-     (0x0801E000..0x0801FFFF) is reserved for the owner record area, which
-     stores which public key this board currently trusts as its root. Same
-     technique as the SRAM4 carve-out below -- the area sits outside every
-     MEMORY region, so the linker cannot place anything there in this image or
-     any future one. That is a guarantee rather than a convention, and it is
-     the point: an owner record overwritten by code would silently drop the
-     board back to the factory root.
-
-     It costs no extra sector. The area is parasitic on a sector the bootloader
-     already owns and does not fill, so the 8K comes out of slack rather than
-     out of code. Current image size and headroom: docs/test/MEASUREMENTS.md
-     (the one place that number lives -- a copy here would go stale unnoticed,
-     which is exactly what happened to the copy that used to be on this line).
-
-     Design: docs/design/OWNERSHIP.md. Plan and steps: docs/work/M1-owner-slot.md.
-     Requirement C10. */
-  FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 120K
+     The whole of sector 0: the root area lives in sector 15 (decision 72),
+     so nothing else shares this sector. See
+     $PROD/docs/modules/M1/FLASHBOOT.md. */
+  FLASH (rx)     : ORIGIN = 0x08000000, LENGTH = 128K
   DTCMRAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 128K
   RAM_D1 (xrw)   : ORIGIN = 0x24000000, LENGTH = 512K
   RAM_D2 (xrw)   : ORIGIN = 0x30000000, LENGTH = 288K
@@ -77,8 +63,10 @@ MEMORY
      the boot-mode handoff record (see IAPServer/IAP_boot_handoff.h). Because the
      address is outside every MEMORY region the linker cannot place anything
      there, in this image or any future one -- a guarantee, not a convention.
-     Keep this identical to the Arduino core's variants/.../ldscript.ld. */
-  RAM_D3 (xrw)   : ORIGIN = 0x38000020, LENGTH = 64K - 32
+     Keep this identical to the Arduino core's variants/.../ldscript.ld.
+     The next 4096 bytes are the boot log, carved out the same way: see
+     $PROD/docs/modules/M1/BOOT-LOG.md. */
+  RAM_D3 (xrw)   : ORIGIN = 0x38001020, LENGTH = 64K - 32 - 4096
   ITCMRAM (xrw)  : ORIGIN = 0x00000000, LENGTH = 64K
 }
 

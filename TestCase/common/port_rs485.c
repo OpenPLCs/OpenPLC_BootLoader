@@ -1,0 +1,120 @@
+// port_rs485.c
+//
+// Shared USART2 / SP3485EN access - see port_rs485.h.
+
+#include "port_rs485.h"
+
+static UART_HandleTypeDef huart_rs485;
+
+static uint32_t s_rs485_overruns;   /* PortRs485_Overruns */
+
+uint32_t PortRs485_Overruns(void)
+{
+    return s_rs485_overruns;
+}
+
+void PortRs485_ResetOverruns(void)
+{
+    s_rs485_overruns = 0u;
+}
+
+void PortRs485_DriveEnable(int on)
+{
+    HAL_GPIO_WritePin(PORT_RS485_DIR_PORT, PORT_RS485_DIR_PIN,
+                      on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+int PortRs485_Init(uint32_t baud)
+{
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_USART2_CLK_ENABLE();
+
+    GPIO_InitTypeDef gpio = {0};
+
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio.Pin   = PORT_RS485_DIR_PIN;
+    HAL_GPIO_Init(PORT_RS485_DIR_PORT, &gpio);
+    PortRs485_DriveEnable(0);
+
+    gpio.Mode      = GPIO_MODE_AF_PP;
+    gpio.Pull      = GPIO_NOPULL;
+    gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+    gpio.Alternate = GPIO_AF7_USART2;
+    gpio.Pin       = PORT_RS485_TX_PIN;
+    HAL_GPIO_Init(PORT_RS485_DIR_PORT, &gpio);
+
+    /* RO is high-Z while /RE is high: the pull-up makes that read as idle. */
+    gpio.Pull = GPIO_PULLUP;
+    gpio.Pin  = PORT_RS485_RX_PIN;
+    HAL_GPIO_Init(PORT_RS485_DIR_PORT, &gpio);
+
+    huart_rs485.Instance                    = USART2;
+    huart_rs485.Init.BaudRate               = baud;
+    huart_rs485.Init.WordLength             = UART_WORDLENGTH_8B;
+    huart_rs485.Init.StopBits               = UART_STOPBITS_1;
+    huart_rs485.Init.Parity                 = UART_PARITY_NONE;
+    huart_rs485.Init.Mode                   = UART_MODE_TX_RX;
+    huart_rs485.Init.HwFlowCtl              = UART_HWCONTROL_NONE;
+    huart_rs485.Init.OverSampling           = UART_OVERSAMPLING_16;
+    huart_rs485.Init.OneBitSampling         = UART_ONE_BIT_SAMPLE_DISABLE;
+    huart_rs485.Init.ClockPrescaler         = UART_PRESCALER_DIV1;
+    huart_rs485.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+
+    s_rs485_overruns = 0u;
+    if (HAL_UART_Init(&huart_rs485) != HAL_OK) {
+        return 0;
+    }
+
+    /* Give the receiver the USART's 8-byte FIFO, so a superloop pass longer
+       than one byte time (87 us at 115200) no longer costs a byte. */
+    (void)HAL_UARTEx_SetTxFifoThreshold(&huart_rs485, UART_TXFIFO_THRESHOLD_1_8);
+    (void)HAL_UARTEx_SetRxFifoThreshold(&huart_rs485, UART_RXFIFO_THRESHOLD_1_8);
+    (void)HAL_UARTEx_EnableFifoMode(&huart_rs485);
+    return 1;
+}
+
+int PortRs485_SendRaw(const uint8_t *data, uint16_t len)
+{
+    return (int)HAL_UART_Transmit(&huart_rs485, (uint8_t *)data, len, 200);
+}
+
+int PortRs485_Send(const uint8_t *data, uint16_t len)
+{
+    PortRs485_DriveEnable(1);
+    int st = PortRs485_SendRaw(data, len);
+    PortRs485_DriveEnable(0);
+    return st;
+}
+
+/* Raw registers, not HAL_UART_Receive: that leaves ORE latched after an overrun
+ * and the receiver deaf until reset. Same shape as UART4_IRQHandler in
+ * porttool.c: clear the error flags, then take the byte. */
+int PortRs485_RecvByte(uint8_t *out)
+{
+    USART_TypeDef *u = huart_rs485.Instance;
+    uint32_t isr;
+
+    if (u == NULL) {
+        return 0;
+    }
+    isr = u->ISR;
+
+    if ((isr & (USART_ISR_ORE | USART_ISR_FE | USART_ISR_NE)) != 0u) {
+        u->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
+        if ((isr & USART_ISR_ORE) != 0u) {
+            s_rs485_overruns++;
+        }
+    }
+
+    if ((isr & USART_ISR_RXNE_RXFNE) == 0u) {
+        return 0;
+    }
+    if (out != NULL) {
+        *out = (uint8_t)(u->RDR & 0xFFu);
+    } else {
+        (void)u->RDR;
+    }
+    return 1;
+}
