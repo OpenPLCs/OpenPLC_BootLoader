@@ -1,4 +1,4 @@
-# open-plc
+# OpenPLC_BootLoader
 # Prerequisities (Win or Linux)
 a- Download and install STM32-Cube IDE lastest [Link](https://www.st.com/en/development-tools/stm32cubeide.html)  
 b- Download and install arduino ide lastest [Link](https://www.arduino.cc/en/software)  
