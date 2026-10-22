@@ -1,6 +1,6 @@
 @echo off
 REM Wrapper so CubeMX can run restore_ld_script.py after code generation.
-REM Registered in open_plc_cube_ide.ioc as ProjectManager.UAScriptAfterPath.
+REM Registered in OpenPLC_BootLoader.ioc as ProjectManager.UAScriptAfterPath.
 REM A .bat rather than the .py directly: whether CubeMX honours the Windows
 REM file association for .py is not something this project relies on.
 REM See $PROD/docs/build/CUBEMX-RULES.md.

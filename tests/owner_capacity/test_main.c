@@ -44,7 +44,7 @@
 #include "iap_keyderive_stub.h"
 #include "uECC.h"
 
-/* Field offsets: open_plc_cube_ide/IAPServer/owner_slot.h. */
+/* Field offsets: OpenPLC_BootLoader/IAPServer/owner_slot.h. */
 #define OFF_TYPE          0U
 #define OFF_RESERVED0     1U
 #define OFF_FORMAT_VER    2U

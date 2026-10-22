@@ -1,6 +1,6 @@
 /*
  * owner_slot.c includes this for Flash_If_Write() alone. The real header
- * (open_plc_cube_ide/Core/Inc/usbd_cdc_flash.h) drags in the HAL and the USB
+ * (OpenPLC_BootLoader/Core/Inc/usbd_cdc_flash.h) drags in the HAL and the USB
  * device stack, neither of which exists on a PC, so this declares the one
  * function and nothing else. The prototype must stay identical to the real
  * one or the harness would be testing a different call.

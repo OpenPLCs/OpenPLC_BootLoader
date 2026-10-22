@@ -28,7 +28,7 @@ There are three ways to stay in the UPLOAD mode:
 ---
 
 # Download BootLoader-Menu to PLC-H743IIKx  
-a- Clone the git repo  (ssh://git@git.schaeffer-ag.de/OpenPLC_Alpha/open_plc_cube_ide.git)  
+a- Clone the git repo  (https://github.com/OpenPLCs/OpenPLC_BootLoader.git)  
 b- Open the project using STM32Cube ide  
 c- Compile the project  
 
@@ -44,8 +44,8 @@ f- Connect the device USB port to pc with USB cable (Arduino IDE will download b
 
 g- Connect the network cable between router and OpenPLC  
 
-h- using Cube IDE, select Run -> open_plc_cube_ide   
- (If it is empty, click 'Run Configurations...' -> select 'open_plc_cube_ide' -> 'Run' )  
+h- using Cube IDE, select Run -> OpenPLC_BootLoader   
+ (If it is empty, click 'Run Configurations...' -> select 'OpenPLC_BootLoader' -> 'Run' )  
 i- download file to the board  
 
 ![image](DOC/pic/3.png)

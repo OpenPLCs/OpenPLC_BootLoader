@@ -42,6 +42,6 @@ const uint8_t *owner_slot_root(void)
 bool owner_slot_is_revoked(const uint8_t leaf_pubkey[64])
 {
 	/* Same 16-byte prefix comparison as the real owner_slot_is_revoked() --
-	 * see open_plc_cube_ide/IAPServer/owner_slot.c. */
+	 * see OpenPLC_BootLoader/IAPServer/owner_slot.c. */
 	return s_have_revoked && (memcmp(leaf_pubkey, s_revoked, 16U) == 0);
 }

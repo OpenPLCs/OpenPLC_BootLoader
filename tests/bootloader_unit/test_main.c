@@ -4,7 +4,7 @@
  *
  * Compiles and runs the REAL bootloader source (sha256.c, iap_keyderive.c,
  * iap_cert.c, fw_verify.c + micro-ecc, iap_auth.c from
- * open_plc_cube_ide/IAPServer) natively on the PC, against a fake HAL
+ * OpenPLC_BootLoader/IAPServer) natively on the PC, against a fake HAL
  * (stubs/hal_stub.c) and a fake owner slot (stubs/owner_slot_stub.c).
  * IAP_server.c's command parser is out of scope -- it needs the whole
  * USB/TCP/Flash stack.

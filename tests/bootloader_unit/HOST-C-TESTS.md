@@ -1,7 +1,7 @@
 # IAP Bootloader Host Test
 
 Case **T1-16**. Runs the *real* bootloader certificate and auth source
-(`open_plc_cube_ide/IAPServer/`: `sha256.c`, `iap_keyderive.c`, `iap_cert.c`,
+(`OpenPLC_BootLoader/IAPServer/`: `sha256.c`, `iap_keyderive.c`, `iap_cert.c`,
 `fw_verify.c` + the vendored micro-ecc, `iap_auth.c`, `net_rand.c`) natively on a PC against
 a fake STM32 HAL and a fake owner slot (`stubs/`), instead of only being
 testable by flashing real hardware.
