@@ -11,6 +11,7 @@
 
 #include "sd_test.h"
 #include "main.h"
+#include "rtc.h"
 #include "ff.h"
 #include "ff_gen_drv.h"
 #include <stdio.h>
@@ -187,22 +188,79 @@ static DSTATUS SD_Test_DiskStatus(BYTE lun)
     return (HAL_SD_GetCardState(&hsd1) == HAL_SD_CARD_TRANSFER) ? 0 : STA_NOINIT;
 }
 
-static DRESULT SD_Test_DiskRead(BYTE lun, BYTE *buff, DWORD sector, UINT count)
+/* The block transfers feed the SDMMC FIFO by polling; a USB interrupt in the
+ * middle under- or overruns it, so OTG_FS is held off for their duration only
+ * (the host's packets are NAKed and resent). PORTTOOL-FLOW.md B.11 in $PROD. */
+static uint32_t sd_hold_usb(void)
+{
+    uint32_t was = NVIC_GetEnableIRQ(OTG_FS_IRQn);
+    NVIC_DisableIRQ(OTG_FS_IRQn);
+    return was;
+}
+
+static void sd_release_usb(uint32_t was)
+{
+    if (was != 0U) {
+        NVIC_EnableIRQ(OTG_FS_IRQn);
+    }
+}
+
+static HAL_StatusTypeDef sd_read_blocks(uint8_t *buf, uint32_t lba, uint32_t count, uint32_t timeout)
+{
+    uint32_t was = sd_hold_usb();
+    HAL_StatusTypeDef st = HAL_SD_ReadBlocks(&hsd1, buf, lba, count, timeout);
+    sd_release_usb(was);
+    return st;
+}
+
+static HAL_StatusTypeDef sd_write_blocks(const uint8_t *buf, uint32_t lba, uint32_t count, uint32_t timeout)
+{
+    uint32_t was = sd_hold_usb();
+    HAL_StatusTypeDef st = HAL_SD_WriteBlocks(&hsd1, (uint8_t *)buf, lba, count, timeout);
+    sd_release_usb(was);
+    return st;
+}
+
+static DRESULT SD_Test_DiskRead(BYTE lun, BYTE *buff, LBA_t sector, UINT count)
 {
     (void)lun;
-    if (HAL_SD_ReadBlocks(&hsd1, buff, sector, count, 30000U) != HAL_OK) {
+    if (sd_read_blocks(buff, (uint32_t)sector, count, 30000U) != HAL_OK) {
         return RES_ERROR;
     }
     return SD_Test_WaitTransferReady() ? RES_OK : RES_ERROR;
 }
 
-static DRESULT SD_Test_DiskWrite(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
+static DRESULT SD_Test_DiskWrite(BYTE lun, const BYTE *buff, LBA_t sector, UINT count)
 {
     (void)lun;
-    if (HAL_SD_WriteBlocks(&hsd1, (uint8_t *)buff, sector, count, 30000U) != HAL_OK) {
+    if (sd_write_blocks(buff, (uint32_t)sector, count, 30000U) != HAL_OK) {
         return RES_ERROR;
     }
     return SD_Test_WaitTransferReady() ? RES_OK : RES_ERROR;
+}
+
+/* FatFs stamps files with this: the board's RTC, brought up the way rtc.read
+ * does; 2000-01-01 00:00 if it will not come up (PORTTOOL-FLOW.md B.11 in $PROD). */
+DWORD get_fattime(void)
+{
+    RTC_TimeTypeDef t = {0};
+    RTC_DateTypeDef d = {0};
+
+    if (hrtc.State != HAL_RTC_STATE_READY) {
+        MX_RTC_Init();
+    }
+    if (hrtc.State == HAL_RTC_STATE_READY) {
+        /* Time before date: reading the time locks the shadow registers until
+         * the date is read (RM0433 RTC). */
+        (void)HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+        (void)HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+    }
+    if ((d.Month == 0U) || (d.Date == 0U)) {
+        d.Month = 1U;
+        d.Date  = 1U;
+    }
+    return ((DWORD)(d.Year + 20U) << 25) | ((DWORD)d.Month << 21) | ((DWORD)d.Date << 16) |
+           ((DWORD)t.Hours << 11) | ((DWORD)t.Minutes << 5) | ((DWORD)t.Seconds / 2U);
 }
 
 static DRESULT SD_Test_DiskIoctl(BYTE lun, BYTE cmd, void *buff)
@@ -511,13 +569,27 @@ static uint8_t sd_fs_from_sector(const uint8_t *s)
     return SD_FS_UNKNOWN;
 }
 
+static uint32_t sd_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* One block, then the wait the next command needs. */
+static int sd_read_sector(uint8_t *buf, uint32_t lba)
+{
+    if (sd_read_blocks(buf, lba, 1U, SD_TEST_IO_TIMEOUT_MS) != HAL_OK) {
+        return 0;
+    }
+    return SD_Test_WaitTransferReady() ? 1 : 0;
+}
+
 static uint8_t sd_read_fs_type(void)
 {
     static uint8_t sec[512] __attribute__((aligned(4)));
     uint8_t  kind;
     uint32_t part_lba;
 
-    if (HAL_SD_ReadBlocks(&hsd1, sec, 0U, 1U, SD_TEST_IO_TIMEOUT_MS) != HAL_OK) {
+    if (sd_read_blocks(sec, 0U, 1U, SD_TEST_IO_TIMEOUT_MS) != HAL_OK) {
         return SD_FS_NONE;
     }
     /* The card needs a moment before the next command; the diskio glue's own
@@ -529,17 +601,25 @@ static uint8_t sd_read_fs_type(void)
         return kind;
     }
 
-    /* Not a boot sector itself - follow the MBR's first partition entry. The
-     * type byte at 0x1C2 being non-zero is what says there is one. */
+    /* Not a boot sector itself - follow the first partition. The type byte at
+     * 0x1C2 being non-zero says there is one; 0xEE is a GPT disk's protective
+     * entry, and GPT's first partition is found through its header (LBA 1,
+     * entry array LBA at offset 72) and first entry (start LBA at offset 32). */
     if (sec[0x1C2] == 0x00u) {
         return SD_FS_UNKNOWN;
     }
-    part_lba = (uint32_t)sec[0x1C6] | ((uint32_t)sec[0x1C7] << 8) |
-               ((uint32_t)sec[0x1C8] << 16) | ((uint32_t)sec[0x1C9] << 24);
-    if (part_lba == 0U) {
-        return SD_FS_UNKNOWN;
+    if (sec[0x1C2] == 0xEEu) {
+        if (!sd_read_sector(sec, 1U) || (memcmp(sec, "EFI PART", 8) != 0)) {
+            return SD_FS_UNKNOWN;
+        }
+        if (!sd_read_sector(sec, sd_le32(&sec[72]))) {
+            return SD_FS_UNKNOWN;
+        }
+        part_lba = sd_le32(&sec[32]);
+    } else {
+        part_lba = sd_le32(&sec[0x1C6]);
     }
-    if (HAL_SD_ReadBlocks(&hsd1, sec, part_lba, 1U, SD_TEST_IO_TIMEOUT_MS) != HAL_OK) {
+    if ((part_lba == 0U) || !sd_read_sector(sec, part_lba)) {
         return SD_FS_UNKNOWN;
     }
     return sd_fs_from_sector(sec);

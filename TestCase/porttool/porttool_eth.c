@@ -42,6 +42,9 @@
 #include "lwip/tcp.h"
 #include "lwip/netif.h"
 #include "lwip/dhcp.h"
+#if !PORTTOOL_HOST_TEST
+#include "lwip/priv/tcp_priv.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -107,20 +110,29 @@ static void eth_take_echo(const uint8_t *data, uint16_t len)
     PortTool_EchoScan(&eth_echo, &scan, data, len);
 }
 
-static void eth_close_client(struct tcp_pcb *pcb)
+/* Returns 1 when the pcb had to be aborted: a recv callback must then return
+ * ERR_ABRT. A failed close is aborted, or the half-closed pcb keeps the listen
+ * port bound until reset (PORTTOOL-FLOW.md B.9 in $PROD). */
+static int eth_close_client(struct tcp_pcb *pcb)
 {
+    int aborted = 0;
+
     if (pcb == NULL) {
-        return;
+        return 0;
     }
     tcp_arg(pcb, NULL);
     tcp_recv(pcb, NULL);
     tcp_err(pcb, NULL);
     tcp_sent(pcb, NULL);
-    tcp_close(pcb);
+    if (tcp_close(pcb) != ERR_OK) {
+        tcp_abort(pcb);
+        aborted = 1;
+    }
     if (pcb == eth_client_pcb) {
         eth_client_pcb = NULL;
         eth_mirror_len = 0;
     }
+    return aborted;
 }
 
 /* Sends back as much of the backlog as the send buffer takes, and only then
@@ -153,8 +165,10 @@ static err_t eth_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t e
     (void)arg;
 
     if ((err != ERR_OK) || (p == NULL)) {
-        eth_close_client(pcb);
-        return ERR_OK;
+        if (p != NULL) {
+            pbuf_free(p);
+        }
+        return eth_close_client(pcb) ? ERR_ABRT : ERR_OK;
     }
 
     if (pcb != eth_client_pcb) {
@@ -260,6 +274,36 @@ static int eth_lwip_up(char *err, uint32_t err_len)
     return 1;
 }
 
+/* Aborts every connection still bound to the listen port: one a previous
+ * session left closing or in TIME_WAIT would refuse the bind for minutes, and
+ * SO_REUSE stays off (PORTTOOL-FLOW.md B.9 in $PROD). The fake lwIP of the host
+ * build has no such connections. */
+static void eth_free_port(u16_t port)
+{
+#if !PORTTOOL_HOST_TEST
+    struct tcp_pcb *const *lists[] = { &tcp_active_pcbs, &tcp_tw_pcbs };
+
+    for (uint32_t i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
+        struct tcp_pcb *pcb = *lists[i];
+
+        while (pcb != NULL) {
+            if ((pcb->local_port == port) && (pcb != eth_client_pcb)) {
+                tcp_arg(pcb, NULL);
+                tcp_recv(pcb, NULL);
+                tcp_err(pcb, NULL);
+                tcp_sent(pcb, NULL);
+                tcp_abort(pcb);
+                pcb = *lists[i];   /* the list changed: start it again */
+                continue;
+            }
+            pcb = pcb->next;
+        }
+    }
+#else
+    (void)port;
+#endif
+}
+
 static int eth_listen(char *err, uint32_t err_len)
 {
     struct tcp_pcb *pcb;
@@ -268,6 +312,7 @@ static int eth_listen(char *err, uint32_t err_len)
         tcp_close(eth_listen_pcb);
         eth_listen_pcb = NULL;
     }
+    eth_free_port((u16_t)eth_port);
 
     pcb = tcp_new();
     if (pcb == NULL) {

@@ -19,7 +19,7 @@
 
 #if PORTTOOL_ENABLE
 
-#define PORTTOOL_VERSION "0.18.3"
+#define PORTTOOL_VERSION "0.18.9"
 
 /* Each porttool_<name>.c defines one of these. */
 extern porttool_port_t porttool_ain;
@@ -144,7 +144,9 @@ static void line_check(uint32_t now_ms)
     if (line_baud == PORTTOOL_LINE_DEFAULT_BAUD || line_next != 0U) {
         return;
     }
-    if ((uint32_t)(now_ms - line_heard_ms) < PORTTOOL_LINE_SILENCE_MS) {
+    /* Signed: a byte heard after now_ms was sampled (poll_command runs later
+     * in the same pass) must not wrap into a 49-day silence. */
+    if ((int32_t)(now_ms - line_heard_ms) < (int32_t)PORTTOOL_LINE_SILENCE_MS) {
         return;
     }
     line_set(PORTTOOL_LINE_DEFAULT_BAUD);
