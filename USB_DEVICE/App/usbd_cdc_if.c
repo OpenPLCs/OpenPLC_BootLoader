@@ -173,6 +173,7 @@ static int8_t CDC_Init_FS(void)
 	USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
 #if !PORTTOOL_ENABLE
 	s_dtr = false;
+	IAP_cdc_session_closed(); /* a re-enumeration ends whatever session the host had */
 #endif
 	return (USBD_OK);
   /* USER CODE END 3 */
@@ -234,6 +235,8 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 
 		if (dtr && !s_dtr) {
 			identify_blink_request();
+		} else if (!dtr && s_dtr) {
+			IAP_cdc_session_closed();
 		}
 		s_dtr = dtr;
 		break;

@@ -86,9 +86,12 @@ static void unlock(uint32_t primask)
 }
 
 /* Push the area out of the D-cache so a soft reset does not lose it. A no-op
- * when the D-cache is off. */
+ * when the D-cache is off. SRAM ECC holds a write narrower than a word until
+ * the next one and drops it on reset; a byte into the reserved word pushes
+ * the ring's last partial word out ($PROD/docs/modules/M1/BOOT-LOG.md). */
 static void flush(void)
 {
+	*(volatile uint8_t *)&hdr()->reserved = 0U;
 	__DSB();
 	SCB_CleanDCache_by_Addr((uint32_t *)BOOT_LOG_ADDR, (int32_t)BOOT_LOG_SIZE);
 	__DSB();

@@ -126,11 +126,18 @@ already has firmware on it.
   loss".
 - **The boot log warns when the brown-out reset level is not 2.7 V.** The level
   lives in the chip's option bytes; the bootloader only reads it.
-- **Logs and example output go to RS232** (terminals C05 / C06, 115200 baud),
-  not USB. USB is for uploading; `USB_Serial` is the one example that still
-  prints there, because USB serial is what it shows. The core switches the
-  RS232 transceiver on at start-up, so a sketch no longer enables it, and the
-  `[BOOT] millis=` line no longer depends on start-up timing.
+- **USB is for debugging and uploading; RS232 is left to your devices.** The
+  bootloader's and the core's log lines (they start with `[sys]`) and
+  `Serial` all go to USB port 1. What the board logs before the PC opens the
+  port is kept in a 4 KiB buffer that survives a reset (not a power cut) and
+  is printed when the port opens; `IAPTool log <ip>` reads the same buffer
+  over the network. RS232 (terminals C05 / C06) stays silent until the sketch
+  calls `RS232.begin()`, which also switches its transceiver on.
+- **Setting USB port 1 to 1200 baud no longer resets the board.** It puts the
+  port in upload mode instead: meanwhile `Serial` output is dropped and nothing
+  arrives to read, and the upload tool asks the sketch to restart into the
+  bootloader with a signed request. Closing the port or picking another rate
+  hands it back to the sketch.
 - **`openplcResetCause()`** tells a sketch why the board last reset: watchdog,
   power-on, reset button, software or brown-out. `IWatchdog.isReset()` is always
   false on this board, because the bootloader has already cleared the flag it

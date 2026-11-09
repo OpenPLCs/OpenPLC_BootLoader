@@ -204,20 +204,11 @@ void process_command() {
 			// Only while the board has no root, over any channel, no button
 			// (decision 72). Changing an existing owner needs the current
 			// owner's signature and is a different command (setowner).
+			char keyhex[129];
 			uint8_t key[64];
-			const char *hex = (const char *)RXBuffer + 8;
-			uint32_t i;
-			bool ok = true;
 
-			for (i = 0U; i < 64U; i++) {
-				unsigned int byte;
-				if (sscanf(&hex[i * 2U], "%2x", &byte) != 1) {
-					ok = false;
-					break;
-				}
-				key[i] = (uint8_t)byte;
-			}
-			if (!ok) {
+			if ((sscanf((char *)RXBuffer + 8, "%128s", keyhex) != 1)
+					|| !hex_decode(keyhex, key, sizeof(key))) {
 				send_response("Bad key");
 			} else if (owner_slot_claim(key)) {
 				send_response("OK");
@@ -246,8 +237,6 @@ void process_command() {
 			char sighex[129];
 			uint8_t key[64];
 			uint8_t sig[64];
-			bool ok = true;
-			uint32_t i;
 
 			if (sscanf((char *)RXBuffer + strlen(verb), " %" SCNu32 " %128s %128s",
 					&gen, keyhex, sighex) != 3) {
@@ -255,17 +244,8 @@ void process_command() {
 			} else if ((strlen(keyhex) != 128U) || (strlen(sighex) != 128U)) {
 				send_response("Bad length");
 			} else {
-				for (i = 0U; i < 64U; i++) {
-					unsigned int kb, sb;
-					if ((sscanf(&keyhex[i * 2U], "%2x", &kb) != 1) ||
-							(sscanf(&sighex[i * 2U], "%2x", &sb) != 1)) {
-						ok = false;
-						break;
-					}
-					key[i] = (uint8_t)kb;
-					sig[i] = (uint8_t)sb;
-				}
-				if (!ok) {
+				if (!hex_decode(keyhex, key, sizeof(key))
+						|| !hex_decode(sighex, sig, sizeof(sig))) {
 					send_response("Bad hex");
 				} else if (wipe) {
 					// Success resets without a reply, as the tool expects
@@ -301,9 +281,7 @@ void process_command() {
 			char sighex[129];
 			uint8_t leaf_prefix[OWNER_REVOKE_PREFIX_LEN];
 			uint8_t sig[64];
-			bool ok = true;
 			bool already = false;
-			uint32_t i;
 
 			if (sscanf((char *)RXBuffer + 7, "%32s %128s",
 					leafhex, sighex) != 2) {
@@ -312,24 +290,8 @@ void process_command() {
 					(strlen(sighex) != 128U)) {
 				send_response("Bad length");
 			} else {
-				memset(leaf_prefix, 0, sizeof(leaf_prefix));
-				for (i = 0U; i < OWNER_REVOKE_PREFIX_LEN; i++) {
-					unsigned int lb;
-					if (sscanf(&leafhex[i * 2U], "%2x", &lb) != 1) {
-						ok = false;
-						break;
-					}
-					leaf_prefix[i] = (uint8_t)lb;
-				}
-				for (i = 0U; ok && (i < 64U); i++) {
-					unsigned int sb;
-					if (sscanf(&sighex[i * 2U], "%2x", &sb) != 1) {
-						ok = false;
-						break;
-					}
-					sig[i] = (uint8_t)sb;
-				}
-				if (!ok) {
+				if (!hex_decode(leafhex, leaf_prefix, sizeof(leaf_prefix))
+						|| !hex_decode(sighex, sig, sizeof(sig))) {
 					send_response("Bad hex");
 				} else if (owner_slot_revoke(leaf_prefix, sig, &already)) {
 					// "already" keeps a repeat call honest: it succeeded, but
@@ -789,8 +751,27 @@ void IAP_servers_start(IAP_Method mode) {
 #define IAP_IDLE_RX_STALE_MS 500U
 static volatile uint32_t s_idle_rx_last_tick;
 
+static volatile bool s_cdc_closed;
+
+void IAP_cdc_session_closed(void) {
+	s_cdc_closed = true;
+}
+
 void IAP_task(void) {
 	IAP_link_report();
+	if (s_cdc_closed) {
+		s_cdc_closed = false;
+		/* A host gone mid-upload would otherwise leave the board taking every
+		 * later command as image data until a reset. Only the CDC session:
+		 * an ethernet upload in progress is not this host's. Between commands
+		 * there is nothing to drop: a stale fragment goes after
+		 * IAP_IDLE_RX_STALE_MS, and the host may already have reopened the port.
+		 * $PROD/docs/modules/M1/IAP-PROTOCOL.md, after the flash round trip. */
+		if ((current_method == IAP_CDC) && (current_status == FLASH_RECEIVE)) {
+			printf("USB host closed the port - dropping the session\r\n");
+			reset_buf();
+		}
+	}
 	if (data_is_ready > 0) {
 		data_is_ready = 0;
 		process_command();

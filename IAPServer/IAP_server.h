@@ -43,6 +43,10 @@ void iap_identity_string(char *out, uint32_t out_len);
 
 void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len);
 
+/* The USB host closed the port or re-enumerated. Safe from interrupt context;
+ * IAP_task() drops a CDC session in progress. */
+void IAP_cdc_session_closed(void);
+
 
 #ifdef __cplusplus
 }

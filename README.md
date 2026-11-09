@@ -61,7 +61,7 @@ i- download file to the board
 
 a- add the following url to arduino > file > preferences (https://raw.githubusercontent.com/OpenPLCs/OpenPLC_Arduino_PKG_Json/master/package_openplc_alp_index.json)  
 *If you have already installed the package, Please remove it first and then follow the instruction.*  
-***\**Please don't try to connect OpenPLC with serial monitor at baud rate 1200. Because it will cause the openplc keep rebooting.***  
+***\**Don't open the serial monitor at 1200 baud: that rate is reserved for uploads, and the sketch's `Serial` output is not shown at it.***  
 
 ![image](DOC/pic/9.png)  
 
