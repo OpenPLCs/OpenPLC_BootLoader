@@ -17,7 +17,7 @@
  * they had already drifted once (bootloader said 0.1.2 while the application
  * said 0.1.3, so tool logs showed one board with two versions). */
 #ifndef OPENPLC_FW_VERSION
-#define OPENPLC_FW_VERSION "0.1.3"
+#define OPENPLC_FW_VERSION "0.2.0"
 #endif
 
 #define BOOT_LOADER_VERSION "Boot Loader " OPENPLC_FW_VERSION "\r\n"

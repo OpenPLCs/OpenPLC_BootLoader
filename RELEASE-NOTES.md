@@ -9,7 +9,7 @@ already has firmware on it.
 
 ---
 
-## Unreleased — 0.1.3
+## 0.2.0
 
 ### What changed
 
@@ -34,7 +34,7 @@ already has firmware on it.
   VBAT witness register collided with the application's nonce counter, so every
   pass through the bootloader reset that counter and the application then
   reissued the same nonce sequence. The witness has moved to a free register.
-- **The bootloader reports its own version correctly** (`0.1.3`; it said `0.1.2`
+- **The bootloader reports its own version correctly** (`0.2.0`; it said `0.1.2`
   before) and reports the reset cause as `PIN`, `SOFT` or `POR`.
 - **Every sketch must now declare its own version.** Add one line near the top:
   `OPENPLC_APP_VERSION(1, 0, 0);`. A sketch without it **does not compile** —
@@ -63,7 +63,7 @@ already has firmware on it.
   bootloader over ST-Link. Ownership survives either way.
   ⚠️ Going *into* this release still loses ownership: the sector-15 layout
   changed, so nothing written by an earlier build is read (see
-  [Upgrade rules](#upgrade-rules)). From 0.1.3 onwards both `flashboot` and an
+  [Upgrade rules](#upgrade-rules)). From 0.2.0 onwards both `flashboot` and an
   ST-Link reflash of the bootloader keep it.
 - **A leaf certificate can be revoked**, so one departing colleague no longer
   means re-keying everybody:
@@ -178,7 +178,7 @@ already has firmware on it.
   `SubGhz` libraries.
 - **`IAPTool` refuses a board whose bootloader cannot answer `getpubkey`**
   instead of uploading without checking the key. Older bootloaders are not
-  supported; flash the 0.1.3 bootloader first (see
+  supported; flash the 0.2.0 bootloader first (see
   [Boards already in service](#boards-already-in-service-flash-the-bootloader-over-st-link)).
 - **An Ethernet upload stops if a different board answers at the address.**
   After rebooting the board into its bootloader, `IAPTool` checks the UID at
@@ -248,7 +248,7 @@ as:
 | `0x081FFFE0` | 32 bytes | Layout marker, written last, so a half-written sector is recognised |
 
 A sector 15 written by any earlier build has no layout marker. The first start
-of the 0.1.3 bootloader therefore prints
+of the 0.2.0 bootloader therefore prints
 `** Sector 15 is not in this layout ... rebuilt with calibration only. **`
 and rewrites the sector keeping only the calibration data, so:
 
@@ -267,23 +267,21 @@ released board is supposed to keep it.
 
 ### Boards already in service: flash the bootloader over ST-Link
 
-**Every board running a bootloader older than 0.1.3 gets the 0.1.3 bootloader
+**Every board running a bootloader older than 0.2.0 gets the 0.2.0 bootloader
 over ST-Link.** There is no in-place upgrade from an older bootloader, by
 decision: ownership does not carry across the layout change anyway.
 
-1. **Flash the 0.1.3 bootloader over ST-Link** — steps in
+1. **Flash the 0.2.0 bootloader over ST-Link** — steps in
    [README.md, "Download BootLoader-Menu to PLC-H743IIKx"](README.md#download-bootloader-menu-to-plc-h743iikx)
    (for a scripted flash that also checks the result:
    `$PROD/docs/engineering/HOW-TO-RUN-TESTS.md`, "出厂态怎么造、怎么证明").
-2. **Install the 0.1.3 board package.** The version number is unchanged from
-   the earlier 0.1.3 build, so the IDE offers no update: remove the installed
-   package and install it again.
+2. **Install the 0.2.0 board package.**
 3. **Upload the sketch.** The board has no root, so this first upload claims it
    for your key and the board starts the application.
 
 ### The upload tool has to be upgraded too
 
-**A 0.1.2 IAPTool cannot flash a 0.1.3 board**, and the failure is quiet: the
+**A 0.1.2 IAPTool cannot flash a 0.2.0 board**, and the failure is quiet: the
 old tool authenticates with an HMAC, the new bootloader wants a certificate and
 a signed challenge, and the board answers `ERR` with
 `flash command failed authentication` on its serial log. Nothing says "wrong
@@ -293,9 +291,9 @@ The tool ships inside the Arduino board package, so installing the package
 updates it — but a machine that keeps a copy elsewhere, or a script pointing at
 an old path, will fail this way until it is pointed at the new one.
 
-### Flashing the bootloader from 0.1.3 onwards
+### Flashing the bootloader from 0.2.0 onwards
 
-Once a board runs the 0.1.3 bootloader, there are two ways to replace it, and
+Once a board runs the 0.2.0 bootloader, there are two ways to replace it, and
 both keep ownership, the application and calibration: the root area and the
 metadata live in sector 15, which neither of them writes.
 
