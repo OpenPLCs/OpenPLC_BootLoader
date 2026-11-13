@@ -79,13 +79,7 @@ d- after download, select the openplc board "OPEN-PLC"
 
 ![image](DOC/pic/13.png)  
 
-e1- You could select upload method "CDC Transfer" and select the OpenPLC CDC(usb) port "COM3 | /dev/ttyACM0"  
-
-![image](DOC/pic/14.png)  
-
-e2- Or You could select upload method "ETH Transfer"   
-
-![image](DOC/pic/15.png)  
+e- Select the board's port under *Tools > Port*: its USB port (for example "COM3" or "/dev/ttyACM0") uploads over USB, its network port (the board's IP) uploads over Ethernet. The port decides how the sketch is uploaded; there is no separate upload-method setting.
 
 f- write your sketch  
 
