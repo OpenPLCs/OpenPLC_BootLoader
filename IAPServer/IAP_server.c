@@ -557,9 +557,9 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
 	app_msp   = *(__IO uint32_t *)IAP_APP_ADDRESS;
 	app_reset = *(__IO uint32_t *)(IAP_APP_ADDRESS + 4);
 
-	/* Take the request first: boot_handoff_take() is also what reads and clears
-	 * RCC->RSR, so it has to run before anything else can look at the reset
-	 * cause. It consumes the record, so a stale request can never pin us here. */
+	/* Take the request first. It consumes the record, so a stale request can
+	 * never pin us here. RCC->RSR was already latched and cleared by
+	 * boot_handoff_latch_reset_cause() at the top of main(). */
 	req = boot_handoff_take();
 
 	/* boot0Pressed is read by the caller at the end of the boot window, not
@@ -798,7 +798,7 @@ void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len) {
 		s_idle_rx_last_tick = HAL_GetTick();
 
 		// A text command ends at '\n' or '\r' (IAPTool sends '\n'; a raw
-		// terminal may send only '\r'). The "flash" command (~610 bytes)
+		// terminal may send only '\r'). The "flash" command (~540 bytes)
 		// spans several USB packets / TCP segments, so fragments accumulate
 		// until the terminator or a full buffer; IAP_task() drops a partial
 		// command that never gets one.

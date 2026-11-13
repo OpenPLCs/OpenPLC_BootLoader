@@ -272,7 +272,7 @@ over ST-Link.** There is no in-place upgrade from an older bootloader, by
 decision: ownership does not carry across the layout change anyway.
 
 1. **Flash the 0.2.0 bootloader over ST-Link** — steps in
-   [README.md, "Download BootLoader-Menu to PLC-H743IIKx"](README.md#download-bootloader-menu-to-plc-h743iikx)
+   [Flashing the bootloader](https://github.com/OpenPLCs/OpenPLC_Instruction/blob/master/docs/user/FLASH-BOOTLOADER.md)
    (for a scripted flash that also checks the result:
    `$PROD/docs/engineering/HOW-TO-RUN-TESTS.md`, "出厂态怎么造、怎么证明").
 2. **Install the 0.2.0 board package.**

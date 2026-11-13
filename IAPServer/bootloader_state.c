@@ -21,7 +21,7 @@ extern uint16_t Flash_If_Erase(uint32_t Add, uint32_t NbSectors);
 #define IAP_SECTOR_SIZE      (128U * 1024U)
 
 /* Calibration data: fixed address at the start of the sector, written by the
- * production fixture over JLINK (DECISIONS.md #61). Nothing here reads it; it
+ * fixture firmware's pt.calw (DECISIONS.md #142). Nothing here reads it; it
  * only has to survive a reclaim. Format: calib_area.h. */
 #define IAP_CALIB_BASE       IAP_STATE_SECTOR_ADDR
 #define IAP_CALIB_SIZE       CALIB_AREA_SIZE
