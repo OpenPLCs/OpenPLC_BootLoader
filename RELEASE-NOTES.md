@@ -11,6 +11,11 @@ already has firmware on it.
 
 ## 0.2.0
 
+0.2.0 was republished in place on 2026-11-13 and 2026-11-14 with the fixes
+listed below (no Upload method menu, USB without data loss, USB upload on
+Linux). The Boards Manager does not offer an update for a republish: if you
+installed 0.2.0 before 2026-11-14, remove it and install it again.
+
 ### What changed
 
 - **A rejected upload no longer disturbs the application already on the board.**
@@ -45,10 +50,13 @@ already has firmware on it.
   reports running, the upload stops. To flash it anyway set
   *Tools ▸ Force flash (allow older version)* to **Yes**; that is **one-shot**
   and is refused again until the menu goes back to **No**.
-  ⚠️ **This only works over ETH Transfer.** On CDC the board running an
-  application answers nothing (the sketch owns the CDC pipe), so its version
-  cannot be read; SWD and Serial bypass the tool entirely. The check is a guard
-  against pushing a stale build by mistake — it is not a security control.
+  It applies over USB and over the network alike. A board sitting in its
+  bootloader has no sketch version to compare, so nothing is checked then. The
+  check is a guard against pushing a stale build by mistake — it is not a
+  security control.
+- **There is no Upload method menu.** The port picks the way: select the
+  board's USB port and the upload goes over USB, select its network address and
+  it goes over Ethernet.
 - **The board reports two versions now.** The discovery reply gained a fifth
   field: `name_uid_role_<package version>_<sketch version>`. The bootloader has
   no sketch version to report and sends `-`.
@@ -133,6 +141,9 @@ already has firmware on it.
   is printed when the port opens; `IAPTool log <ip>` reads the same buffer
   over the network. RS232 (terminals C05 / C06) stays silent until the sketch
   calls `RS232.begin()`, which also switches its transceiver on.
+- **`Serial` loses nothing when the sketch reads slowly.** When its receive
+  queue is full the PC is held off until the sketch reads; before, the next
+  USB packet overwrote data not yet read.
 - **Setting USB port 1 to 1200 baud no longer resets the board.** It puts the
   port in upload mode instead: meanwhile `Serial` output is dropped and nothing
   arrives to read, and the upload tool asks the sketch to restart into the
@@ -162,15 +173,18 @@ already has firmware on it.
   repetitions and collisions, so a slow `loop()` does not miss an acknowledge.
   ⚠️ **A sketch using `OpenPLC_KNX` cannot use TIM1 or TIM12** for anything
   else, PWM on DO1/DO2/DO5/DO6 included.
-- **KNX has two roles, both programmable by ETS**: *Tools ▸ KNX Role* offers
-  KNX TP Device (mask `0x07B0`, the default) and KNX IP Router (`0x091A`).
+- **KNX has two roles, both programmable by ETS**, chosen by one line in the
+  sketch: `OPENPLC_KNX_ROLE(TP_DEVICE);` (KNX TP Device, mask `0x07B0`) or
+  `OPENPLC_KNX_ROLE(IP_ROUTER);` (KNX IP Router, `0x091A`). A sketch that uses
+  `OpenPLC_KNX` without that line does not compile, and the error names the
+  line to add. There is no KNX Role menu.
   The IP+TP device `0x5780` and the IP-only device `0x57B0` are gone.
   The programming button is BOOT0: press it once while the sketch runs, and
   the system LED shows programming mode. When ETS restarts the board, the log
   says so first (`KNX: restart requested by ETS ...`).
 - **KNX examples**: `KNX_Switch`, `KNX_Inputs`, `KNX_Temperature`,
   `KNX_Analog`, `KNX_BusMonitor` (prints every telegram and sends group writes
-  typed on RS232, no ETS needed) and `KNX_IPRouter`. `KNX_Basic`,
+  typed into the Serial Monitor over USB, no ETS needed) and `KNX_IPRouter`. `KNX_Basic`,
   `KNX_IP_Test`, `KNX_SelfTest`, `KNX_TP_PingPong` and `KNX_TP_TxTest` are
   removed.
 - **Eleven upstream examples that do not fit this board are removed**, from the
@@ -191,7 +205,13 @@ already has firmware on it.
   and bootloader at the same address, instead of keeping the old label.
 - **Uploads work on Linux and macOS**: the upload tool, the discovery helper
   and the build scripts install as executables, so an upload no longer fails
-  with `Permission denied`.
+  with `Permission denied`. On Linux an upload over USB to a running sketch
+  works too; it used to fail because Linux keeps the last baud rate when a
+  port is reopened, so the request to enter upload mode never reached the board.
+- **Selecting the board in the IDE's port list makes its LED3 flash** for
+  about 2 s, over USB or the network, so you can tell which board you picked.
+  The package installs an Arduino IDE 2 extension for this; restart the IDE
+  once after installing.
 - **A second compile without changes is incremental** instead of rebuilding
   the whole core.
 - **An ETS download can no longer erase the application.** An uninitialised
@@ -217,7 +237,7 @@ interface consistent.
 | `RS232_TX_Pin`, `RS232_RX_Pin`, `RS232_EN_Pin` | `RS232_TX`, `RS232_RX`, `RS232_EN` |
 | `KNXHelper.<method>` | `KNX.<method>` — `KNX` is the only KNX object now |
 | `KNX.setup("OPENPLC000001")` (serial number) | `KNX.setup("OPENPLC-TP")` — the ETS product's order number |
-| *KNX Role* `IP+TP Device` (`0x5780`) or `KNXnet/IP Device` (`0x57B0`) | `KNX TP Device` (`0x07B0`) or `KNX IP Router` (`0x091A`) |
+| *Tools ▸ KNX Role* (any choice, including `IP+TP Device` `0x5780` and `KNXnet/IP Device` `0x57B0`) | One line in the sketch: `OPENPLC_KNX_ROLE(TP_DEVICE);` (`0x07B0`) or `OPENPLC_KNX_ROLE(IP_ROUTER);` (`0x091A`) |
 | `#include <STM32SD.h>` | `#include <OpenPLC_SD.h>`; `SD` / `File` keep their shape |
 | `SD.begin(SDMMC_CD_Pin)`; `digitalRead(SDMMC_CD_Pin)` | `SD.begin()`; `SD.cardPresent()` — the card-detect pin is built in. `SDMMC_CLK_Pin`, `SDMMC_CMD_Pin`, `SDMMC_D0_Pin` are gone; `SDMMC_CD_Pin` is `SDMMC_CD` |
 | `CAN_TX_Pin`, `CAN_RX_Pin` | `CAN_TX`, `CAN_RX` (the `CAN` object sets them up itself) |
@@ -428,10 +448,10 @@ needs a re-upload list, which `IAPTool getapprevoked` gives you.
 
 - ~~MAC addresses are unique across boards.~~ **Verified 2026-09-28** on two
   boards: each derives its own address from the chip UID.
-- **KNX on a real bus with ETS.** The TP data link passed its host-side tests,
-  and `KNX_BusMonitor` sent and received on a real bus; the ETS-programmed
-  examples (`KNX_Switch`, `KNX_Inputs`, `KNX_Temperature`, `KNX_Analog`) and
-  `KNX_IPRouter` have not yet passed their tests against other KNX devices.
+- **`KNX_IPRouter` on a real bus.** The ETS-programmed examples (`KNX_Switch`,
+  `KNX_Inputs`, `KNX_Temperature`, `KNX_Analog`) and `KNX_BusMonitor` passed
+  their tests against other KNX devices on a real bus; the IP router has not
+  yet passed its forwarding test.
 - ~~Behaviour when power is lost mid-upgrade.~~ **Verified 2026-09-01** (test
   cases T1-21/T1-22): losing power during the transfer is harmless — the old
   application starts normally and the application region is untouched. Losing
@@ -446,8 +466,8 @@ needs a re-upload list, which `IAPTool getapprevoked` gives you.
   for the board to finish and come back, so the tool's exit is a usable signal
   again and automation no longer has to watch the serial log for
   `Checksum and signature OK`.
-- **GPT-partitioned SD cards on a real board.** Supported in the file system
-  configuration and tested on the host only.
+- ~~GPT-partitioned SD cards on a real board.~~ **Verified 2026-11-14**: a GPT
+  card is recognised, written and read back on a real board.
 - Long-term stability under a real OpenPLC runtime.
 
 There is no second secret: the board holds only public keys.
