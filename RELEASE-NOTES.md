@@ -448,10 +448,12 @@ needs a re-upload list, which `IAPTool getapprevoked` gives you.
 
 - ~~MAC addresses are unique across boards.~~ **Verified 2026-09-28** on two
   boards: each derives its own address from the chip UID.
-- **`KNX_IPRouter` on a real bus.** The ETS-programmed examples (`KNX_Switch`,
-  `KNX_Inputs`, `KNX_Temperature`, `KNX_Analog`) and `KNX_BusMonitor` passed
-  their tests against other KNX devices on a real bus; the IP router has not
-  yet passed its forwarding test.
+- **KNX on a real bus since typed input moved to USB.** The ETS-programmed
+  examples (`KNX_Switch`, `KNX_Inputs`, `KNX_Temperature`, `KNX_Analog`) and
+  `KNX_BusMonitor` were walked through by hand against other KNX devices on a
+  real bus on 2026-10-15, when they still read typed input from RS232; they
+  have not been run again since it moved to USB. `KNX_IPRouter` has not yet
+  passed its forwarding test.
 - ~~Behaviour when power is lost mid-upgrade.~~ **Verified 2026-09-01** (test
   cases T1-21/T1-22): losing power during the transfer is harmless — the old
   application starts normally and the application region is untouched. Losing
