@@ -375,7 +375,7 @@ void process_command() {
 					send_response("ERR");
 					/* Log only: this is the one rejection path an unauthenticated
 					 * caller can reach, so it must never touch Flash. */
-					bootloader_state_note_auth_fail(tcp_server_get_client_ip());
+					bootloader_state_note_auth_fail((current_method == IAP_ETHERNET) ? tcp_server_get_client_ip() : 0U);
 				} else {
 					/* Nothing is erased yet: the image is staged in SDRAM and
 					 * the app region is only touched once it has passed CRC
@@ -411,8 +411,6 @@ void process_command() {
 			memcpy((uint8_t *)(IAP_STAGE_BASE + received_bytes), RXBuffer, len_in_RX_buffer);
 			received_bytes += len_in_RX_buffer;
 			memset(RXBuffer, 0, len_in_RX_buffer);
-			printf("Staged %" PRIu32 " bytes (%" PRIu32 " of total %" PRIu32 ")\r\n",
-                    len_in_RX_buffer, received_bytes, expected_size);
 			len_in_RX_buffer = 0;
 
 			send_response("OK");
@@ -646,7 +644,6 @@ IAP_Method server_decide(uint8_t boot0Pressed) {
 
 	if (mode != IAP_NONE) {
 		printf("** UPLOAD Mod ... (%s)\r\n", reason);
-		printf("** Please input your command: \r\n");
 	} else {
 		printf("** APP Mod ...\r\n");
 	}
@@ -806,7 +803,6 @@ void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len) {
 				|| memchr(RXBuffer, '\r', len_in_RX_buffer) != NULL
 				|| len_in_RX_buffer >= IAP_RX_BUFFER_SIZE) {
 			data_is_ready = 1;
-			printf("IDLE ready \r\n");
 		}
 	} else {
 		uint32_t remaining = IAP_RX_BUFFER_SIZE - len_in_RX_buffer;
@@ -826,8 +822,6 @@ void IAP_data_recv(IAP_Method iapM, uint8_t *Buf, uint32_t Len) {
 		if (len_in_RX_buffer >= IAP_RX_BUFFER_SIZE
 				|| received_bytes + len_in_RX_buffer >= expected_size) {
 			data_is_ready = 1;
-			printf("Data is ready to FLash LenInRXBuffer %"PRIu32 " : received %"PRIu32 " of %"PRIu32 " \r\n",
-					len_in_RX_buffer, received_bytes, expected_size);
 		}
 	}
 

@@ -272,7 +272,7 @@ static boot0_gesture_t boot_window(void)
 	/* Printed BEFORE the window, not after: if the board resets partway
 	 * through it, the line for the interrupted attempt still reaches the log
 	 * and the restart shows up as a second one. */
-	printf("Startup window: system LED blinking for %u s\r\n",
+	printf("Startup window: LED3 blinking fast for %u s\r\n",
 			(unsigned)(BOOT0_WINDOW_MS_TOTAL / 1000U));
 
 	for (uint32_t t = 0U; t < BOOT0_WINDOW_MS_TOTAL; t += 2U * BOOT0_WINDOW_BLINK_MS) {
@@ -289,8 +289,8 @@ static boot0_gesture_t boot_window(void)
 	/* Down at the decision point, so the board stays in the bootloader whatever
 	 * happens next. Keep watching only to tell the two gestures apart. Nothing
 	 * below can change that decision -- it can only add the factory reset. */
-	printf("** BOOT0 held - keep holding for %u s to arm a factory reset, "
-			"or let go now for upload mode **\r\n",
+	printf("** BOOT0 held - keep holding until LED3 stays lit (%u s after the reset) to "
+			"arm a factory reset, or let go now for upload mode **\r\n",
 			(unsigned)(BOOT0_FACTORY_HOLD_MS / 1000U));
 
 	held_ms = BOOT0_WINDOW_MS_TOTAL;
@@ -406,7 +406,7 @@ int main(void)
 #endif
 
   printf("** Checking Starting Mod ...\r\n"
-		  "** (IF You want OpenPLC to stay in upload mode, hold down the BOOT0 button until the system LED stops blinking)\r\n");
+		  "** (to stay in upload mode, press BOOT0 while LED3 blinks fast and release it when the blinking stops)\r\n");
 
   printf("** Reset cause: %s\r\n", boot_handoff_reset_cause_str());
 

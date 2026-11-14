@@ -100,7 +100,7 @@ bool iap_auth_verify_and_consume(const uint8_t *msg, uint32_t msg_len,
 	}
 
 	if (!s_nonce_pending) {
-		printf("Auth rejected: no nonce pending, call authchallenge first\r\n");
+		printf("Auth rejected: no challenge pending (the upload tool's requests arrived out of order); retry the upload\r\n");
 		return false;
 	}
 	s_nonce_pending = false; /* one-shot: consumed whether this check passes or not */

@@ -352,8 +352,15 @@ void bootloader_state_note_auth_fail(uint32_t peer_ip)
 {
 	s_auth_fail_total++;
 
-	printf("Auth rejected (attempt %" PRIu32 " this boot, peer %08" PRIX32 ")\r\n",
-			s_auth_fail_total, peer_ip);
+	/* peer_ip is in network byte order: the first octet is the low byte. */
+	if (peer_ip == 0U) {
+		printf("Auth rejected (attempt %" PRIu32 " this boot, via USB)\r\n", s_auth_fail_total);
+	} else {
+		printf("Auth rejected (attempt %" PRIu32 " this boot, from %u.%u.%u.%u)\r\n",
+				s_auth_fail_total,
+				(unsigned)(peer_ip & 0xFFU), (unsigned)((peer_ip >> 8) & 0xFFU),
+				(unsigned)((peer_ip >> 16) & 0xFFU), (unsigned)(peer_ip >> 24));
+	}
 }
 
 void bootloader_state_hash_app(uint32_t app_base, uint32_t size, uint8_t out_sha256[32])

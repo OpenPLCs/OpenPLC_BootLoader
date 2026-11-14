@@ -13,8 +13,12 @@ already has firmware on it.
 
 0.2.0 was republished in place on 2026-11-13 and 2026-11-14 with the fixes
 listed below (no Upload method menu, USB without data loss, USB upload on
-Linux). The Boards Manager does not offer an update for a republish: if you
-installed 0.2.0 before 2026-11-14, remove it and install it again.
+Linux), corrected messages from the upload tool, the bootloader and the
+examples, a single *Tools > USB support* option, and without the production
+fixture's `FixtureDemo` among the examples. The Boards Manager does not offer
+an update for a republish: if you installed 0.2.0 before 2026-11-15, remove it
+and install it again. Boards already running the 0.2.0 bootloader keep working;
+flash it again over ST-Link only if you want the corrected boot log.
 
 ### What changed
 

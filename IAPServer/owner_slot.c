@@ -822,7 +822,7 @@ void owner_slot_report(void)
 
 		if (self_named) {
 			printf("** A revocation names the root currently in force - ignored "
-					"(a root can never revoke itself, R4). **\r\n");
+					"(a root can never revoke itself). **\r\n");
 		}
 	}
 }
