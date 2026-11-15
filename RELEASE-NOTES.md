@@ -295,8 +295,9 @@ released board is supposed to keep it.
 over ST-Link.** There is no in-place upgrade from an older bootloader, by
 decision: ownership does not carry across the layout change anyway.
 
-1. **Flash the 0.2.0 bootloader over ST-Link** — steps in
-   [Flashing the bootloader](https://github.com/OpenPLCs/OpenPLC_Instruction/blob/master/docs/user/FLASH-BOOTLOADER.md)
+1. **Flash the 0.2.0 bootloader over ST-Link** — the built image
+   `OpenPLC_BootLoader-0.2.0.hex` is attached to this release; steps in
+   [Flash the bootloader](https://github.com/OpenPLCs/OpenPLC_Instruction#2-flash-the-bootloader)
    (for a scripted flash that also checks the result:
    `$PROD/docs/engineering/HOW-TO-RUN-TESTS.md`, "出厂态怎么造、怎么证明").
 2. **Install the 0.2.0 board package.**
@@ -450,6 +451,8 @@ needs a re-upload list, which `IAPTool getapprevoked` gives you.
 
 ### Not verified
 
+- **Flashing the attached `.hex` with STM32CubeProgrammer** has not been walked
+  on a board. It is the same image STM32CubeIDE flashes, which is verified.
 - ~~MAC addresses are unique across boards.~~ **Verified 2026-09-28** on two
   boards: each derives its own address from the chip UID.
 - **KNX on a real bus since typed input moved to USB.** The ETS-programmed
@@ -498,5 +501,9 @@ also runs the host-side tests. Run it before working through the rest by hand.
 - [ ] Everything verified in the live Arduino15 package has been copied back
       into the core package's git repository and committed.
       → `$CORE_REPO/tests/check_core_sync.py`
+- [ ] Bootloader built from the tagged commit with `$TEST/tools/build_image.py`
+      and `Debug/OpenPLC_BootLoader.hex` attached to this repository's release
+      as `OpenPLC_BootLoader-<version>.hex` (again after every in-place
+      republish).
 - [ ] Bootloader flashed over ST-Link/DFU and the application uploaded over
       IAP, in that order, on a board that previously ran the older release.
