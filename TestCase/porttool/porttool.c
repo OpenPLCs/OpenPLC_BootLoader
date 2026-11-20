@@ -7,6 +7,7 @@
 #include "porttool_calw.h"  /* pt.calw; also where PORTTOOL_CALIB_BASE comes from */
 #include "porttool_aodiag.h" /* TEMPORARY: pt.aodiag, see that header */
 #include "porttool_run.h"
+#include "porttool_age.h"   /* pt.age: the aging mode in sector 6 */
 #include "port_led.h"
 
 #include "main.h"
@@ -19,7 +20,7 @@
 
 #if PORTTOOL_ENABLE
 
-#define PORTTOOL_VERSION "0.18.9"
+#define PORTTOOL_VERSION "0.18.10"
 
 /* Each porttool_<name>.c defines one of these. */
 extern porttool_port_t porttool_ain;
@@ -675,6 +676,8 @@ static void dispatch(const char *line)
         cmd_hold(rest);
     } else if (strcmp(verb, "pt.led") == 0) {
         cmd_led(rest);
+    } else if (strcmp(verb, "pt.age") == 0) {
+        PortAge_Command(rest);
     } else if (strcmp(verb, "pt.aodiag") == 0) {   /* TEMPORARY, porttool_aodiag.h */
         PortTool_AoDiag(rest, stop_all);
     } else {
@@ -794,11 +797,14 @@ void PortTool_Run(void)
            "  pt.led fault=1                   light the indicator; 0 clears\r\n\r\n",
            PORTTOOL_VERSION);
 
+    PortAge_Boot(HAL_GetTick());   /* an unfinished aging task resumes on power-up */
+
     for (;;) {
         uint32_t now = HAL_GetTick();
 
         hold_check(now);
         tick_sessions(now);
+        PortAge_Tick(now);
         PortEth_Poll();
         poll_command();
         line_apply(now);

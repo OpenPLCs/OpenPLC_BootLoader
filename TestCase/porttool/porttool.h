@@ -250,4 +250,7 @@ void PortSdFile_RunList(const char *args, char *out, uint32_t len);
 void PortSdFile_RunRemove(const char *args, char *out, uint32_t len);
 void PortSdFile_RunEject(const char *args, char *out, uint32_t len);
 
+/* One reading of the temperature sensors into `out`, for the aging mode. */
+void PortTemp_RunRead(const char *args, char *out, uint32_t len);
+
 #endif /* TESTCASE_PORTTOOL_PORTTOOL_H_ */

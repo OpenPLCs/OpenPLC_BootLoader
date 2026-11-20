@@ -617,6 +617,18 @@ uint32_t PortTool_RunCaps(int emit)
     return lines;
 }
 
+int PortTool_RunCapture(const char *name, const char *args, char *out, uint32_t len)
+{
+    for (uint32_t i = 0; i < TARGET_COUNT; i++) {
+        if (strcmp(targets[i].name, name) == 0) {
+            out[0] = '\0';
+            targets[i].body(args, out, len);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int PortTool_RunTarget(const char *name, const char *args)
 {
     char body[PORTTOOL_REPLY_MAX];

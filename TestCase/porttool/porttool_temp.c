@@ -147,6 +147,34 @@ static void temp_limits(char *out, uint32_t out_len)
              (unsigned)PORT_TEMP_COUNT, (unsigned long)PORTTOOL_PERIOD_MIN_MS);
 }
 
+/* One reading of the selected sensors, the session frame's fields without the
+ * echo counters: what the aging mode judges (PORTTOOL-FLOW.md C.3.9). */
+void PortTemp_RunRead(const char *args, char *out, uint32_t len)
+{
+    char err[PORTTOOL_REPLY_MAX];
+    uint32_t n;
+
+    if (!temp_start(args != NULL ? args : "", err, sizeof(err))) {
+        snprintf(out, len, "ok=0 err=\"%s\"", err);
+        return;
+    }
+    n = (uint32_t)snprintf(out, len, "vdda=%lu ok=%d", (unsigned long)PortAdc_VddaMv(),
+                           PortAdc_VddaTrusted());
+    for (int i = 1; i <= PORT_TEMP_COUNT && n < len; i++) {
+        uint32_t mv = 0;
+        int32_t decic = 0;
+        int w;
+        if ((temp_mask & (1U << (i - 1))) == 0U) { continue; }
+        if (PortAdc_ReadTemp(i, &mv, &decic)) {
+            w = snprintf(out + n, len - n, " ch%d=%lu/%ld", i, (unsigned long)mv, (long)decic);
+        } else {
+            w = snprintf(out + n, len - n, " ch%d=fail", i);
+        }
+        if (w < 0) { break; }
+        n += (uint32_t)w;
+    }
+}
+
 porttool_port_t porttool_temp = {
     .name     = "temp",
     .board    = PORTTOOL_BOARD_LOWER,

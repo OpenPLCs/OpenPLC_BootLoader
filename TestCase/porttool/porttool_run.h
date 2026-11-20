@@ -14,6 +14,10 @@
  * empty. */
 int PortTool_RunTarget(const char *name, const char *args);
 
+/* Runs one target into `out` without printing: the aging mode judges the
+ * reply itself. Returns 0 when the name is unknown. */
+int PortTool_RunCapture(const char *name, const char *args, char *out, uint32_t len);
+
 /* Prints one OK line per target, for pt.run with no argument. */
 void PortTool_RunList(void);
 
