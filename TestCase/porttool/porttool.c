@@ -172,6 +172,11 @@ uint32_t PortTool_ClampPeriod(uint32_t requested_ms)
                                                    : requested_ms;
 }
 
+/* While PortTool_SessionSample runs, its port's frames land here instead. */
+static const char *frame_cap_port;
+static char       *frame_cap;
+static uint32_t    frame_cap_len;
+
 void PortTool_Frame(const char *port, const char *fmt, ...)
 {
     char body[PORTTOOL_REPLY_MAX];
@@ -180,6 +185,11 @@ void PortTool_Frame(const char *port, const char *fmt, ...)
     va_start(ap, fmt);
     (void)vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
+
+    if (frame_cap_port != NULL && strcmp(port, frame_cap_port) == 0) {
+        snprintf(frame_cap, frame_cap_len, "%s", body);
+        return;
+    }
 
     if (!line_settled) {
         return;
@@ -650,6 +660,23 @@ static void dispatch(const char *line)
 
     PortCmd_Word(line, verb, sizeof(verb), &rest);
 
+    /* Aging (porttool_age.c): its RS232 token comes back through the shorting
+     * plug, and so does everything else the board prints - answering that would
+     * never stop. A real command means the PC is on the line: pause. */
+    if (strncmp(line, "~age", 4) == 0) {
+        PortAge_LineSeen(line);
+        return;
+    }
+    if (strncmp(verb, "pt.", 3) != 0) {
+        if (PortAge_Running()) {
+            return;
+        }
+    } else if (strcmp(verb, "pt.age") != 0
+               || (strncmp(rest != NULL ? rest : "", "read", 4) != 0
+                   && strncmp(rest != NULL ? rest : "", "fail", 4) != 0)) {
+        PortAge_Pause();
+    }
+
     if (verb[0] == '\0') {
         return;
     } else if (strcmp(verb, "pt.run") == 0) {
@@ -684,6 +711,48 @@ static void dispatch(const char *line)
         printf("ERR unknown command \"%s\"\r\n", verb);
     }
 }
+
+static void poll_command(void);
+static porttool_port_t *find_port(const char *name);
+
+int PortTool_SessionSample(const char *port, const char *args, uint32_t ms,
+                           char *out, uint32_t len)
+{
+    char err[96];
+    porttool_port_t *p = find_port(port);
+
+    out[0] = '\0';
+    if (p == NULL || p->tick == NULL) {
+        snprintf(out, len, "ok=0 err=no_port");
+        return 0;
+    }
+    err[0] = '\0';
+    if (p->running || p->start == NULL || !p->start(args != NULL ? args : "", err, sizeof(err))) {
+        snprintf(out, len, "ok=0 err=start");
+        return 0;
+    }
+    frame_cap_port = p->name;
+    frame_cap = out;
+    frame_cap_len = len;
+#if PORTTOOL_HOST_TEST
+    /* The host clock only moves between commands: step it here. */
+    for (uint32_t t = 0; t <= ms; t += 10U) {
+        p->tick(HAL_GetTick() + t);
+    }
+#else
+    for (uint32_t t0 = HAL_GetTick(); HAL_GetTick() - t0 < ms;) {
+        p->tick(HAL_GetTick());
+    }
+#endif
+    frame_cap_port = NULL;
+    if (p->stop != NULL) {
+        p->stop();
+    }
+    return out[0] != '\0';
+}
+
+/* For the aging RS232 loop, which waits for its line inside an item. */
+void PortTool_PollCommand(void) { poll_command(); }
 
 /* Collects one line without ever blocking the sampling loop. */
 static void poll_command(void)

@@ -9,6 +9,12 @@
 #include "porttool_cmd.h"
 #include "porttool_run.h"
 #include "port_led.h"
+#include "port_din.h"
+#include "port_dout.h"
+#include "relay.h"
+#include "port_adc.h"
+#include "port_dac.h"
+#include "port_vref.h"
 
 #include "main.h"
 
@@ -107,6 +113,38 @@ static int age_append(const age_rec_t *r)
         rec_off += AGE_WORD;
     }
     return ok;
+}
+
+/* Copies flash into RAM without a bus fault on a word left half-written by a
+ * power cut (uncorrectable ECC): fault masked and BFHFNMIGN set while reading,
+ * the bank 2 DBECCERR flag says whether it happened. Returns 0 when it did. */
+static int age_copy(void *dst, uintptr_t src, uint32_t n)
+{
+#ifdef SCB_CCR_BFHFNMIGN_Msk
+    uint32_t primask = __get_PRIMASK();
+    int bad;
+
+    __disable_irq();
+    __HAL_FLASH_CLEAR_FLAG_BANK2(FLASH_FLAG_SNECCERR_BANK2 | FLASH_FLAG_DBECCERR_BANK2);
+    __set_FAULTMASK(1);
+    SCB->CCR |= SCB_CCR_BFHFNMIGN_Msk;
+    __DSB();
+    __ISB();
+    memcpy(dst, (const void *)src, n);
+    SCB->CCR &= ~SCB_CCR_BFHFNMIGN_Msk;
+    __DSB();
+    __ISB();
+    __set_FAULTMASK(0);
+    bad = __HAL_FLASH_GET_FLAG_BANK2(FLASH_FLAG_DBECCERR_BANK2) != 0U;
+    __HAL_FLASH_CLEAR_FLAG_BANK2(FLASH_FLAG_SNECCERR_BANK2 | FLASH_FLAG_DBECCERR_BANK2);
+    if (primask == 0U) {
+        __enable_irq();
+    }
+    return !bad;
+#else
+    memcpy(dst, (const void *)src, n);   /* host build: no ECC */
+    return 1;
+#endif
 }
 
 /* ---- the task ------------------------------------------------------------- */
@@ -268,9 +306,121 @@ static int judge(const char *checks, const char *reply)
     return 1;
 }
 
+/* ---- the harness loops ------------------------------------------------------ */
+
+static uint32_t rs232_seq;
+static volatile int rs232_back;
+
+void PortAge_LineSeen(const char *line)
+{
+    char want[16];
+
+    snprintf(want, sizeof(want), "~age%lu", (unsigned long)rs232_seq);
+    if (strcmp(line, want) == 0) {
+        rs232_back = 1;
+    }
+}
+
+/* C05 and C06 shorted: a line sent comes straight back. */
+static void loop_rs232(char *out, uint32_t len)
+{
+#if PORTTOOL_HOST_TEST
+    snprintf(out, len, "ok=1 sim=1");
+#else
+    uint32_t t0;
+
+    rs232_seq++;
+    rs232_back = 0;
+    printf("~age%lu\r\n", (unsigned long)rs232_seq);
+    t0 = HAL_GetTick();
+    while (!rs232_back && HAL_GetTick() - t0 < 200U) {
+        PortTool_PollCommand();
+    }
+    snprintf(out, len, "ok=%d", rs232_back);
+#endif
+}
+
+/* DO1-6 through relays 1-6 into DI1-6, DO7 and DO8 straight into DI7, DI8. */
+static void loop_dodi(char *out, uint32_t len)
+{
+#if PORTTOOL_HOST_TEST
+    snprintf(out, len, "ok=1 sim=1");
+#else
+    const uint32_t full = (1UL << PortDout_Res()) - 1UL;
+
+    PortDin_Init();
+    Relay_Init();
+    if (!PortDout_Init()) {
+        snprintf(out, len, "ok=0 err=dout_init");
+        return;
+    }
+    for (int k = 1; k <= PORT_DOUT_COUNT; k++) {
+        PortDout_SetFreq(k, 1000U);
+        PortDout_SetDuty(k, 0U);
+    }
+    for (int k = 1; k <= PORT_DOUT_COUNT && k <= PORT_DIN_COUNT; k++) {
+        uint8_t on, off;
+        if (k <= (int)RELAY_COUNT) { Relay_On((RELAY_Name)(k - 1)); }
+        PortDout_SetDuty(k, full);
+        HAL_Delay(30U);
+        on = PortDin_ReadBits();
+        PortDout_SetDuty(k, 0U);
+        if (k <= (int)RELAY_COUNT) { Relay_Off((RELAY_Name)(k - 1)); }
+        HAL_Delay(30U);
+        off = PortDin_ReadBits();
+        if (on != (uint8_t)(1U << (k - 1)) || off != 0U) {
+            snprintf(out, len, "ok=0 ch=%d on=0x%02X off=0x%02X", k, on, off);
+            return;
+        }
+    }
+    snprintf(out, len, "ok=1");
+#endif
+}
+
+/* AO1 -> AI1 and AO2 -> AI2: both DACs to mv1= and mv2=, read both AIs. */
+static void loop_aoai(const char *args, char *out, uint32_t len)
+{
+#if PORTTOOL_HOST_TEST
+    (void)args;
+    snprintf(out, len, "ok=1 sim=1");
+#else
+    uint32_t mv[2] = { 0U, 0U }, raw[2] = { 0U, 0U }, pin;
+
+    if (!PortCmd_GetU32(args, "mv1", &mv[0]) || !PortCmd_GetU32(args, "mv2", &mv[1])) {
+        snprintf(out, len, "ok=0 err=args");
+        return;
+    }
+    if (!PortVref_Enable() || !PortAdc_Init() || !PortDac_Init()) {
+        snprintf(out, len, "ok=0 err=analog_init");
+        return;
+    }
+    (void)PortDac_SetMv(1, mv[0]);
+    (void)PortDac_SetMv(2, mv[1]);
+    HAL_Delay(50U);
+    for (int ch = 1; ch <= 2; ch++) {
+        if (!PortAdc_ReadAin(ch, &raw[ch - 1], &pin)) {
+            snprintf(out, len, "ok=0 err=ain%d", ch);
+            return;
+        }
+    }
+    snprintf(out, len, "ok=1 raw1=%lu raw2=%lu", (unsigned long)raw[0], (unsigned long)raw[1]);
+#endif
+}
+
 static void run_item(const age_item_t *it, char *reply, uint32_t len)
 {
-    if (strcmp(it->target, "temp.read") == 0) {
+    if (strcmp(it->target, "loop.rs232") == 0) {
+        loop_rs232(reply, len);
+    } else if (strcmp(it->target, "loop.dodi") == 0) {
+        loop_dodi(reply, len);
+    } else if (strncmp(it->target, "session.", 8) == 0) {
+        if (!PortTool_SessionSample(it->target + 8, it->args, 1500U, reply, len)
+            && reply[0] == '\0') {
+            snprintf(reply, len, "ok=0 err=no_frame");
+        }
+    } else if (strcmp(it->target, "loop.aoai") == 0) {
+        loop_aoai(it->args, reply, len);
+    } else if (strcmp(it->target, "temp.read") == 0) {
         PortTemp_RunRead(it->args, reply, len);
     } else if (!PortTool_RunCapture(it->target, it->args, reply, len)) {
         snprintf(reply, len, "unknown target");
@@ -360,22 +510,28 @@ static void record_fail(uint32_t i, const char *reply)
 /* Reads the task header and replays the records; 1 when there is a task. */
 static int load(void)
 {
-    const age_head_t *h = (const age_head_t *)AGE_BASE;
+    age_head_t head;
+    const age_head_t *h = &head;
 
     running = done = passed = 0;
     elapsed_ms = rounds = fails = failed_mask = first_code = 0;
     next_item = 0;
     n_items = 0;
     rec_off = AGE_REC_OFF;
-    if (h->magic != AGE_MAGIC || h->text_len == 0U || h->text_len > AGE_TEXT_MAX
-        || PortTool_Crc32Update(0, (const uint8_t *)(AGE_BASE + AGE_WORD), h->text_len)
-               != h->text_crc
-        || !load_items((const char *)(AGE_BASE + AGE_WORD), h->text_len)) {
+    if (!age_copy(&head, AGE_BASE, sizeof(head)) || h->magic != AGE_MAGIC
+        || h->text_len == 0U || h->text_len > AGE_TEXT_MAX
+        || !age_copy(stage, AGE_BASE + AGE_WORD, h->text_len)
+        || PortTool_Crc32Update(0, (const uint8_t *)stage, h->text_len) != h->text_crc
+        || !load_items(stage, h->text_len)) {
         return 0;
     }
     task_secs = h->secs;
     for (; rec_off <= AGE_SIZE - AGE_WORD; rec_off += AGE_WORD) {
-        const age_rec_t *r = (const age_rec_t *)(AGE_BASE + rec_off);
+        age_rec_t word;
+        const age_rec_t *r = &word;
+        if (!age_copy(&word, AGE_BASE + rec_off, AGE_WORD)) {
+            continue;   /* torn by a power cut: skipped, the next word is still free */
+        }
         switch (r->kind) {
         case 'P':
             elapsed_ms = r->a * 1000U; rounds = r->b; fails = r->c;
@@ -411,6 +567,14 @@ void PortAge_Boot(uint32_t now_ms)
 }
 
 int PortAge_Running(void) { return running; }
+
+void PortAge_Pause(void)
+{
+    if (running) {
+        running = 0;
+        save_progress();
+    }
+}
 
 void PortAge_Tick(uint32_t now_ms)
 {
@@ -480,6 +644,7 @@ static void cmd_commit(void)
     }
     staging = 0;
     PortAge_Boot(HAL_GetTick());
+    running = 0;   /* starts at the next power-up, away from the PC */
     printf("OK age committed items=%lu secs=%lu\r\n", (unsigned long)n_items,
            (unsigned long)task_secs);
 }
@@ -501,7 +666,8 @@ static void cmd_clear(void)
 
 static void cmd_read(void)
 {
-    const char *state = n_items == 0U ? "none" : running ? "run" : passed ? "pass" : "fail";
+    const char *state = n_items == 0U ? "none" : running ? "run" : !done ? "paused"
+                      : passed ? "pass" : "fail";
 
     printf("OK age state=%s secs=%lu elapsed=%lu rounds=%lu fails=%lu items=%lu code=%lu\r\n",
            state, (unsigned long)task_secs, (unsigned long)(elapsed_ms / 1000U),
@@ -519,7 +685,11 @@ static void cmd_fail(const char *rest)
         return;
     }
     for (uint32_t off = AGE_REC_OFF; off <= AGE_SIZE - 2U * AGE_WORD; off += AGE_WORD) {
-        const age_rec_t *r = (const age_rec_t *)(AGE_BASE + off);
+        age_rec_t word, next;
+        const age_rec_t *r = &word;
+        if (!age_copy(&word, AGE_BASE + off, AGE_WORD)) {
+            continue;
+        }
         if (r->kind == 0xFFU) {
             break;
         }
@@ -527,7 +697,10 @@ static void cmd_fail(const char *rest)
             continue;
         }
         char got[16 + AGE_WORD];
-        const uint8_t *t = (const uint8_t *)(AGE_BASE + off + AGE_WORD) + 1;
+        const uint8_t *t = (const uint8_t *)&next + 1;
+        if (!age_copy(&next, AGE_BASE + off + AGE_WORD, AGE_WORD)) {
+            memset(&next, 0xFF, sizeof(next));
+        }
         uint32_t n = 0;
         for (uint32_t j = 0; j < sizeof(r->text) && r->text[j] != '\0' && (uint8_t)r->text[j] != 0xFFU; j++) {
             got[n++] = r->text[j];
@@ -579,6 +752,15 @@ void PortAge_Command(const char *rest)
         printf("OK age add %s\r\n", probe.target);
     } else if (strcmp(verb, "commit") == 0) {
         cmd_commit();
+    } else if (strcmp(verb, "run") == 0) {
+        if (n_items == 0U || done) {
+            printf("ERR age run: no unfinished task\r\n");
+            return;
+        }
+        last_ms = due_ms = HAL_GetTick();
+        running = 1;
+        PortLed_Init();
+        printf("OK age running\r\n");
     } else if (strcmp(verb, "read") == 0) {
         cmd_read();
     } else if (strcmp(verb, "fail") == 0) {
@@ -586,7 +768,7 @@ void PortAge_Command(const char *rest)
     } else if (strcmp(verb, "clear") == 0) {
         cmd_clear();
     } else {
-        printf("ERR pt.age takes begin, add, commit, read, fail or clear\r\n");
+        printf("ERR pt.age takes begin, add, commit, run, read, fail or clear\r\n");
     }
 }
 

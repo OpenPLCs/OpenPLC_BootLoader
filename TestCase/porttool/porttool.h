@@ -250,6 +250,15 @@ void PortSdFile_RunList(const char *args, char *out, uint32_t len);
 void PortSdFile_RunRemove(const char *args, char *out, uint32_t len);
 void PortSdFile_RunEject(const char *args, char *out, uint32_t len);
 
+/* Runs session `port` with `args` for `ms` and leaves its last frame's body in
+ * `out` instead of printing it; for the aging mode. 0 when it did not start or
+ * sent no frame. */
+int PortTool_SessionSample(const char *port, const char *args, uint32_t ms,
+                           char *out, uint32_t len);
+
+/* Reads and dispatches whatever the PC sent, as the main loop does. */
+void PortTool_PollCommand(void);
+
 /* One reading of the temperature sensors into `out`, for the aging mode. */
 void PortTemp_RunRead(const char *args, char *out, uint32_t len);
 

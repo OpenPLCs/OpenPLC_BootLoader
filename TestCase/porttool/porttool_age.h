@@ -21,4 +21,11 @@ void PortAge_Command(const char *rest);
 /* 1 while a task is being run. */
 int PortAge_Running(void);
 
+/* A command from the PC: stop until the next power-up (the PC, not the
+ * shorting plug, is on RS232 now). Progress is saved. */
+void PortAge_Pause(void);
+
+/* A received line that starts "~age": the RS232 loop's own token. */
+void PortAge_LineSeen(const char *line);
+
 #endif /* TESTCASE_PORTTOOL_PORTTOOL_AGE_H_ */
