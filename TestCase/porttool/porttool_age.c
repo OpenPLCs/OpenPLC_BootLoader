@@ -443,6 +443,15 @@ static void led_tick(uint32_t now_ms)
     }
 }
 
+/* From the 1 ms tick interrupt: an item can block the main loop for seconds,
+ * and LED3 must keep its pattern (PORTTOOL-FLOW.md C.3.9 「LED3」). */
+void PortAge_LedTick(uint32_t now_ms)
+{
+    if ((now_ms % 50U) == 0U && (running || done)) {
+        led_tick(now_ms);
+    }
+}
+
 /* ---- running -------------------------------------------------------------- */
 
 static void finish(void)

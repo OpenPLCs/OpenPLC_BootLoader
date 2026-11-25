@@ -28,4 +28,7 @@ void PortAge_Pause(void);
 /* A received line that starts "~age": the RS232 loop's own token. */
 void PortAge_LineSeen(const char *line);
 
+/* LED3 from the 1 ms tick interrupt, so it blinks while an item blocks. */
+void PortAge_LedTick(uint32_t now_ms);
+
 #endif /* TESTCASE_PORTTOOL_PORTTOOL_AGE_H_ */

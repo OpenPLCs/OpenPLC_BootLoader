@@ -20,7 +20,7 @@
 
 #if PORTTOOL_ENABLE
 
-#define PORTTOOL_VERSION "0.18.11"
+#define PORTTOOL_VERSION "0.18.13"
 
 /* Each porttool_<name>.c defines one of these. */
 extern porttool_port_t porttool_ain;

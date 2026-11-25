@@ -51,6 +51,7 @@
 #endif
 #if PORTTOOL_ENABLE
 #include "porttool/porttool.h"
+#include "porttool/porttool_age.h"
 /* The symbol is set by hand rather than by a build configuration, so the one
  * failure mode is shipping an image with it left on: that board never reaches
  * the IAP server and cannot be updated over USB or Ethernet. Say so in the
@@ -636,7 +637,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-
+#if PORTTOOL_ENABLE
+  if (htim->Instance == TIM6)
+  {
+    PortAge_LedTick(HAL_GetTick());
+  }
+#endif
   /* USER CODE END Callback 1 */
 }
 
