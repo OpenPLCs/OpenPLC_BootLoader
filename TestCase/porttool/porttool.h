@@ -232,6 +232,7 @@ void PortEth_Poll(void);
  * the IAP server is not linked in (DECISIONS.md 31). Lives in
  * porttool_usb.c. */
 void PortUsb_Received(const uint8_t *data, uint32_t len);
+void PortUsb_Boot(void);   /* brings the USB stack up once */
 
 
 /* ---- SD file transfer (porttool_sdfile.c, PORTTOOL-FLOW.md B.11) -------

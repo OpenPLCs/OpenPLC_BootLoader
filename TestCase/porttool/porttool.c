@@ -20,7 +20,7 @@
 
 #if PORTTOOL_ENABLE
 
-#define PORTTOOL_VERSION "0.18.10"
+#define PORTTOOL_VERSION "0.18.11"
 
 /* Each porttool_<name>.c defines one of these. */
 extern porttool_port_t porttool_ain;
@@ -867,6 +867,7 @@ void PortTool_Run(void)
            PORTTOOL_VERSION);
 
     PortAge_Boot(HAL_GetTick());   /* an unfinished aging task resumes on power-up */
+    PortUsb_Boot();
 
     for (;;) {
         uint32_t now = HAL_GetTick();

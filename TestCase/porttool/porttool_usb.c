@@ -233,16 +233,23 @@ static int usb_apply(const char *args, char *err, uint32_t err_len)
     return 1;
 }
 
+/* Up at power-on, so the PC has enumerated before the first usb item. See
+ * PORTTOOL-FLOW.md C.3.6, row usb.info. */
+void PortUsb_Boot(void)
+{
+    if (!usb_stack_started) {
+        MX_USB_DEVICE_Init();
+        usb_stack_started = 1;
+    }
+}
+
 static int usb_start(const char *args, char *err, uint32_t err_len)
 {
     if (!usb_apply(args, err, err_len)) {
         return 0;
     }
 
-    if (!usb_stack_started) {
-        MX_USB_DEVICE_Init();
-        usb_stack_started = 1;
-    }
+    PortUsb_Boot();   /* already up unless a host test skipped boot */
 
     /* Not refused when the PC has not opened the port: state= reports that. */
     PortTool_EchoReset(&usb_echo);
