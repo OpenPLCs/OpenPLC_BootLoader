@@ -133,4 +133,22 @@ int  SDRAM_Test_Crc32Once(uint32_t offset, uint32_t length, sdram_crc_t *out);
 void SDRAM_Test_RetentionWrite(uint32_t *rng_state, sdram_retention_t *out);
 void SDRAM_Test_RetentionVerify(sdram_retention_t *out);
 
+/* The same four-pattern sweep as SDRAM_Test_SweepOnce, done in slices for the
+ * aging worker (PORTTOOL-FLOW.md C.3.9 SDRAM). Zero the struct to start. */
+typedef struct {
+    uint8_t  started;          /* bring-up was tried */
+    uint8_t  ready;
+    uint8_t  pattern;          /* 0..3 */
+    uint8_t  verifying;        /* 0 writing, 1 reading back */
+    uint32_t index;            /* next word */
+    uint32_t sweeps;           /* whole sweeps finished */
+    uint32_t mismatches;       /* in the sweep under way */
+    uint32_t first_bad_offset;
+    uint32_t last_mismatches;  /* of the last finished sweep */
+    uint32_t last_first_bad;
+} sdram_bg_t;
+
+/* Works until budget_ms has passed; 1 when this call finished a sweep. */
+int  SDRAM_Test_BgStep(sdram_bg_t *s, uint32_t budget_ms);
+
 #endif /* INC_SDRAM_TEST_H_ */

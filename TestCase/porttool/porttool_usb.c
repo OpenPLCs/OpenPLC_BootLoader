@@ -267,6 +267,17 @@ static int usb_start(const char *args, char *err, uint32_t err_len)
     return 1;
 }
 
+uint32_t PortUsb_AgePush(void)
+{
+    /* One packet per pass: the next is refused until this one is out. */
+    return usb_send(usb_filler, (uint16_t)sizeof(usb_filler));
+}
+
+int PortUsb_Configured(void)
+{
+    return usb_ready();
+}
+
 static int usb_set(const char *args, char *err, uint32_t err_len)
 {
     return usb_apply(args, err, err_len);

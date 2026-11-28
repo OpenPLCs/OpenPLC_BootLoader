@@ -268,6 +268,71 @@ int SDRAM_Test_SweepOnce(sdram_sweep_t *out)
     return SDRAM_Test_FullSweep(out) && out->mismatches == 0U;
 }
 
+/* ---- Background sweep, in slices (aging) ------------------------------ */
+
+static const uint32_t SDRAM_TEST_BG_PATTERNS[4] = {
+    0x00000000UL, 0xFFFFFFFFUL, 0x55555555UL, 0xAAAAAAAAUL,
+};
+
+#define SDRAM_TEST_BG_CHUNK 4096U   /* words between clock checks */
+
+int SDRAM_Test_BgStep(sdram_bg_t *s, uint32_t budget_ms)
+{
+    volatile uint32_t *mem = (volatile uint32_t *)SDRAM_BASE_ADDR;
+    const uint32_t words = SDRAM_SIZE_BYTES / 4U;
+    uint32_t t0 = HAL_GetTick();
+
+    if (!s->started) {
+        s->started = 1;
+        s->ready = SDRAM_Test_Bringup() ? 1 : 0;
+    }
+    if (!s->ready) {
+        return 0;
+    }
+    do {
+        uint32_t end = s->index + SDRAM_TEST_BG_CHUNK;
+        uint32_t p = SDRAM_TEST_BG_PATTERNS[s->pattern];
+        uint32_t i;
+
+        if (end > words) {
+            end = words;
+        }
+        if (!s->verifying) {
+            for (i = s->index; i < end; i++) {
+                mem[i] = p;
+            }
+        } else {
+            for (i = s->index; i < end; i++) {
+                if (mem[i] != p) {
+                    if (s->mismatches == 0U) {
+                        s->first_bad_offset = i * 4U;
+                    }
+                    s->mismatches++;
+                }
+            }
+        }
+        s->index = end;
+        if (end == words) {
+            s->index = 0;
+            if (!s->verifying) {
+                s->verifying = 1;
+            } else {
+                s->verifying = 0;
+                if (++s->pattern == 4U) {
+                    s->pattern = 0;
+                    s->sweeps++;
+                    s->last_mismatches = s->mismatches;
+                    s->last_first_bad = s->first_bad_offset;
+                    s->mismatches = 0;
+                    s->first_bad_offset = 0;
+                    return 1;
+                }
+            }
+        }
+    } while (HAL_GetTick() - t0 < budget_ms);
+    return 0;
+}
+
 /* ---- Retention: random addresses survive a wait? ---------------------- */
 
 static uint32_t SDRAM_Test_Rand(uint32_t *state)

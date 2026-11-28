@@ -55,6 +55,9 @@ void PortCan_Close(void);
 
 int PortCan_Send(uint32_t id, const uint8_t *data, uint8_t len);
 
+/* Frames still queued in the TX FIFO; 0 when closed. */
+uint32_t PortCan_TxPending(void);
+
 /* One frame, or 0 when the FIFO is empty. Never blocks. */
 int PortCan_Receive(uint32_t *id, uint8_t *data, uint8_t *len);
 

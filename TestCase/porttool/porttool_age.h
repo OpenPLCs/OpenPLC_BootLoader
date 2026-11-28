@@ -12,7 +12,7 @@
 /* Reads the task and the records; starts aging when the task is unfinished. */
 void PortAge_Boot(uint32_t now_ms);
 
-/* Runs the next item when due, keeps time, saves progress, drives LED3. */
+/* Services every item's worker, closes 10 s rounds, saves progress, drives LED3. */
 void PortAge_Tick(uint32_t now_ms);
 
 /* pt.age begin|add|commit|read|fail|clear */
@@ -28,7 +28,7 @@ void PortAge_Pause(void);
 /* A received line that starts "~age": the RS232 loop's own token. */
 void PortAge_LineSeen(const char *line);
 
-/* LED3 from the 1 ms tick interrupt, so it blinks while an item blocks. */
+/* LED3 from the 1 ms tick interrupt, so it blinks while SD or RTC blocks. */
 void PortAge_LedTick(uint32_t now_ms);
 
 #endif /* TESTCASE_PORTTOOL_PORTTOOL_AGE_H_ */

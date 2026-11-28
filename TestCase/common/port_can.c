@@ -216,6 +216,14 @@ int PortCan_Send(uint32_t id, const uint8_t *data, uint8_t len)
     return (HAL_FDCAN_AddMessageToTxFifoQ(&s_h, &tx, data) == HAL_OK) ? 1 : 0;
 }
 
+uint32_t PortCan_TxPending(void)
+{
+    if (!s_open) {
+        return 0u;
+    }
+    return CAN_TX_FIFO_ELMTS - HAL_FDCAN_GetTxFifoFreeLevel(&s_h);
+}
+
 int PortCan_Receive(uint32_t *id, uint8_t *data, uint8_t *len)
 {
     FDCAN_RxHeaderTypeDef h;

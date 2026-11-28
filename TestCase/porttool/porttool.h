@@ -47,9 +47,9 @@
  * too fast stalls the loop it lives in. */
 #define PORTTOOL_PERIOD_MIN_MS   50U
 #define PORTTOOL_PERIOD_DEF_MS   200U
-/* LINE_MAX is one line from the PC; 256 fits six different relay values
- * (decision 123). REPLY_MAX is every line the board sends. PORTTOOL-FLOW.md A.3. */
-#define PORTTOOL_LINE_MAX        256U
+/* LINE_MAX is one line from the PC; 320 fits the AO -> AI aging task line
+ * (C.3.9). REPLY_MAX is every line the board sends. PORTTOOL-FLOW.md A.3. */
+#define PORTTOOL_LINE_MAX        320U
 #define PORTTOOL_REPLY_MAX       192U
 
 /* Channel sets are a uint32_t bitmask. */
@@ -234,6 +234,12 @@ void PortEth_Poll(void);
 void PortUsb_Received(const uint8_t *data, uint32_t len);
 void PortUsb_Boot(void);   /* brings the USB stack up once */
 
+/* Aging USB companion (PORTTOOL-FLOW.md C.3.9): filler packets while the
+ * endpoint takes them, returns the bytes accepted; and whether the PC has the
+ * device configured. */
+uint32_t PortUsb_AgePush(void);
+int      PortUsb_Configured(void);
+
 
 /* ---- SD file transfer (porttool_sdfile.c, PORTTOOL-FLOW.md B.11) -------
  *
@@ -250,15 +256,6 @@ void PortSdFile_RunGet(const char *args, char *out, uint32_t len);
 void PortSdFile_RunList(const char *args, char *out, uint32_t len);
 void PortSdFile_RunRemove(const char *args, char *out, uint32_t len);
 void PortSdFile_RunEject(const char *args, char *out, uint32_t len);
-
-/* Runs session `port` with `args` for `ms` and leaves its last frame's body in
- * `out` instead of printing it; for the aging mode. 0 when it did not start or
- * sent no frame. */
-int PortTool_SessionSample(const char *port, const char *args, uint32_t ms,
-                           char *out, uint32_t len);
-
-/* Reads and dispatches whatever the PC sent, as the main loop does. */
-void PortTool_PollCommand(void);
 
 /* One reading of the temperature sensors into `out`, for the aging mode. */
 void PortTemp_RunRead(const char *args, char *out, uint32_t len);
